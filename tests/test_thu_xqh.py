@@ -827,5 +827,76 @@ class TestAllCollections(ServerTestCase):
         self.assertEqual(Handler.hits, [])
 
 
+class TestDestinationLayout(ServerTestCase):
+    """One parent folder, one subfolder per collection."""
+
+    def run_cli(self, command, *args):
+        return main([command, "--base-url", self.base_url, "--delay", "0", *args])
+
+    def test_dest_root_creates_a_subfolder_per_collection(self):
+        root = os.path.join(self.tmp.name, "TsinghuaJournal")
+        self.run_cli("download", "-c", "XQH", "-q", "--dest-root", root,
+                     "--first", "1", "--last", "1")
+        self.run_cli("download", "-c", "QHZK", "-q", "--dest-root", root,
+                     "--first", "7", "--last", "7")
+        self.assertEqual(sorted(os.listdir(root)), ["qhzk", "xqh"])
+        self.assertTrue(os.path.exists(os.path.join(root, "xqh", "0001.pdf")))
+        self.assertTrue(os.path.exists(os.path.join(root, "qhzk", "0007.pdf")))
+
+    def test_each_subfolder_keeps_its_own_manifest(self):
+        root = os.path.join(self.tmp.name, "TsinghuaJournal")
+        self.run_cli("download", "-c", "XQH", "-q", "--dest-root", root,
+                     "--first", "1", "--last", "1")
+        self.run_cli("download", "-c", "QHZK", "-q", "--dest-root", root,
+                     "--first", "7", "--last", "7")
+        for code in ("xqh", "qhzk"):
+            self.assertTrue(os.path.exists(os.path.join(root, code, "manifest.json")))
+
+    def test_separate_runs_resume_independently(self):
+        root = os.path.join(self.tmp.name, "TsinghuaJournal")
+        self.run_cli("download", "-c", "XQH", "-q", "--dest-root", root,
+                     "--first", "1", "--last", "1")
+        Handler.hits = []
+        # Re-running one collection must not re-fetch it, nor touch the other.
+        self.run_cli("download", "-c", "XQH", "-q", "--dest-root", root,
+                     "--first", "1", "--last", "1")
+        self.assertEqual([h for h in Handler.hits if h.endswith(".pdf")], [])
+
+    def test_explicit_dest_still_wins(self):
+        exact = os.path.join(self.tmp.name, "somewhere-else")
+        self.run_cli("download", "-c", "XQH", "-q",
+                     "--dest-root", os.path.join(self.tmp.name, "ignored"),
+                     "--dest", exact, "--first", "1", "--last", "1")
+        self.assertTrue(os.path.exists(os.path.join(exact, "0001.pdf")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp.name, "ignored")))
+
+    def test_dest_root_works_with_all(self):
+        small = {
+            "XQH": Collection(code="XQH", name="新清华", sys_id="23", first=1, last=1),
+            "QHZK": Collection(code="QHZK", name="清华周刊", first=7, last=7),
+        }
+        self.enterContext(unittest.mock.patch.dict(collib.BUILTIN, small, clear=True))
+        root = os.path.join(self.tmp.name, "TsinghuaJournal")
+        code = self.run_cli("download", "-c", "all", "-q", "--dest-root", root,
+                            "--registry", os.path.join(self.tmp.name, "reg.json"))
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(os.listdir(root)), ["qhzk", "xqh"])
+
+    def test_dest_is_still_rejected_with_all(self):
+        code = self.run_cli("download", "-c", "all", "-q",
+                            "--dest", os.path.join(self.tmp.name, "one-folder"))
+        self.assertEqual(code, 2)
+
+    def test_discover_writes_its_id_list_beside_the_pdfs(self):
+        root = os.path.join(self.tmp.name, "TsinghuaJournal")
+        code = self.run_cli("discover", "-c", "QHZK", "-q", "--dest-root", root,
+                            "--max-level", "all", "--coverage-target", "0")
+        self.assertEqual(code, 0)
+        expected = os.path.join(root, "qhzk", "issue-ids-qhzk.txt")
+        self.assertTrue(os.path.exists(expected))
+        with open(expected, encoding="utf-8") as handle:
+            self.assertEqual(list(idlib.iter_id_file(handle.read())), ["0007", "0008"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

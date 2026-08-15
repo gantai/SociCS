@@ -38,8 +38,9 @@ python3 -m thu_xqh verify -c XQH
 python3 -m thu_xqh status -c XQH
 ```
 
-Files land in `pdfs/<collection>/` by default, each with its own manifest, so
-two journals that both number an issue `0001` never collide.
+Files land in `pdfs/<collection>/` by default — pass `--dest-root` to put that
+parent folder wherever you like. Each collection gets its own subfolder and its
+own manifest, so two journals that both number an issue `0001` never collide.
 
 Stop at any point with Ctrl-C and rerun the same command — it resumes. Nothing
 is ever fetched twice.
@@ -99,18 +100,45 @@ python3 -m thu_xqh download -c QHXK       # 25 files
 python3 -m thu_xqh download -c GLQHDXXK   # 888, both series
 ```
 
-### Everything at once
+### Where the files go
 
-`-c all` runs a command over every collection in the registry, each with its
-own destination and manifest:
+`--dest-root` names one parent directory; each collection gets its own
+subfolder inside it, named after the code in lowercase. Its manifest and id
+list live in the same subfolder, so a collection is entirely self-contained.
 
-```bash
-python3 -m thu_xqh download -c all --dry-run   # price the whole platform
-python3 -m thu_xqh download -c all
-python3 -m thu_xqh status -c all
+```
+D:\TsinghuaJournal\
+    xqh\        0001.pdf ... 1670.pdf, manifest.json
+    glqhdxxk\   0001.pdf ... 0832.pdf, f0001.pdf ... f0056.pdf, manifest.json
+    qhxxxk\     0001.pdf ... 0036.pdf, manifest.json
+    qhxk\       0008.pdf ... 0032.pdf, manifest.json
+    rmqh\       0001.pdf ... 0024.pdf, manifest.json
 ```
 
-Single-collection flags (`--dest`, `--out`, `--ids`, `--first`, `--pdf-dir`, …)
+Five separate runs, in any order, on any schedule — each resumes on its own:
+
+```bat
+python -m thu_xqh download -c RMQH     --dest-root D:\TsinghuaJournal
+python -m thu_xqh download -c QHXK     --dest-root D:\TsinghuaJournal
+python -m thu_xqh download -c QHXXXK   --dest-root D:\TsinghuaJournal
+python -m thu_xqh download -c GLQHDXXK --dest-root D:\TsinghuaJournal
+python -m thu_xqh download -c XQH      --dest-root D:\TsinghuaJournal
+```
+
+`--dest` overrides the whole thing when you want one collection somewhere
+specific. Use `--dest-root` for the shared parent; `--dest` for an exact path.
+
+### Everything at once
+
+`-c all` runs a command over every collection in the registry in one go:
+
+```bash
+python3 -m thu_xqh download -c all --dest-root D:\TsinghuaJournal --dry-run
+python3 -m thu_xqh status -c all --dest-root D:\TsinghuaJournal
+```
+
+`--dest-root` is fine here — it is what keeps the journals apart. `--dest` and
+the other single-collection flags (`--out`, `--ids`, `--first`, `--pdf-dir`, …)
 are rejected with `-c all`, since one explicit path would have each journal
 overwrite the last one's work.
 
@@ -261,13 +289,18 @@ Collection picker (on `discover`, `download`, `verify`, `status`):
 
 ## Verification status
 
-The test suite (`python3 -m unittest discover -s tests`, 66 tests) runs against
+The test suite (`python3 -m unittest discover -s tests`, 73 tests) runs against
 a local stand-in server covering two collections, paginated index pages,
 detail-page-only indexes, real PDFs, plain 404s, HTML-error-pages-with-status-200,
 `HEAD`-rejecting servers, truncated PDFs, per-collection manifest isolation,
 request budgets, `-c all` fan-out, and resume behaviour. The directory and
 issue range of every registered collection are pinned by a test, so a refactor
 cannot drift them silently.
+
+On Windows use `python` rather than `python3`. Paths are built with
+`os.path.join` throughout, so `--dest-root D:\TsinghuaJournal` produces
+`D:\TsinghuaJournal\xqh\0001.pdf`. Avoid a trailing backslash inside quotes
+(`"D:\TsinghuaJournal\"`) — cmd.exe reads that as an escaped quote.
 
 **The code has not been run against the live site.** The network policy of the
 environment it was written in blocks `thujournal.lib.tsinghua.edu.cn` outright,

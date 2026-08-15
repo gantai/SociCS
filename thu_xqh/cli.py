@@ -36,8 +36,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     common.add_argument("--manifest", default=None, help="default: <dest>/manifest.json")
     common.add_argument(
+        "--dest-root", default=DEFAULT_DEST_ROOT, metavar="DIR",
+        help="parent directory; each collection gets its own subfolder inside "
+             f"it (default: {DEFAULT_DEST_ROOT})",
+    )
+    common.add_argument(
         "--dest", default=None,
-        help=f"download directory (default: {DEFAULT_DEST_ROOT}/<collection>)",
+        help="exact download directory for this one collection, overriding "
+             "--dest-root and its subfolder",
     )
     common.add_argument(
         "--ignore-robots", action="store_true",
@@ -198,7 +204,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     return 2
                 dest, manifest_path = _paths_for(args, collection)
                 if args.command == "discover":
-                    code = cmd_discover(client, collection, args, log)
+                    code = cmd_discover(client, collection, args, dest, log)
                 else:
                     code = cmd_download(client, collection, args, dest, manifest_path, log)
                 worst = max(worst, code)
@@ -231,7 +237,7 @@ def _resolve_collections(args, registry, log) -> List[Collection]:
 
     # Per-collection outputs are the whole point of 'all'; a single explicit
     # path would have every journal overwrite the last one's work.
-    for flag in ("dest", "manifest", "out", "ids"):
+    for flag in ("dest", "manifest", "out", "ids"):  # note: --dest-root is fine
         if getattr(args, flag, None):
             raise SystemExit(f"--{flag} cannot be combined with '-c all'; "
                              f"run that collection on its own")
@@ -245,7 +251,8 @@ def _resolve_collections(args, registry, log) -> List[Collection]:
 
 
 def _paths_for(args, collection: Collection):
-    dest = args.dest or os.path.join(DEFAULT_DEST_ROOT, collection.code.lower())
+    """Where this collection's files, manifest and id list live."""
+    dest = args.dest or os.path.join(args.dest_root, collection.code.lower())
     manifest_path = args.manifest or os.path.join(dest, "manifest.json")
     return dest, manifest_path
 
@@ -327,7 +334,9 @@ def cmd_collections(args, log) -> int:
     return 0
 
 
-def cmd_discover(client: PoliteClient, collection: Collection, args, log) -> int:
+def cmd_discover(
+    client: PoliteClient, collection: Collection, args, dest: str, log
+) -> int:
     found: set = set()
     supplements: set = set()
     detail_links: List[str] = []
@@ -415,7 +424,7 @@ def cmd_discover(client: PoliteClient, collection: Collection, args, log) -> int
         # remembered as absent.
         all_ids = idlib.sorted_ids(found | set(collection.issue_ids()))
 
-    out_path = args.out or f"issue-ids-{collection.code.lower()}.txt"
+    out_path = args.out or os.path.join(dest, f"issue-ids-{collection.code.lower()}.txt")
     if not args.dry_run:
         _write_ids(out_path, all_ids, collection)
         log(f"\nWrote {len(all_ids)} id(s) to {out_path}")
