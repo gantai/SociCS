@@ -123,7 +123,7 @@ class PoliteClient:
         self,
         base_url: str,
         *,
-        delay: float = 2.0,
+        delay: float = 5.0,
         timeout: float = 45.0,
         user_agent: str = DEFAULT_USER_AGENT,
         max_retries: int = 4,

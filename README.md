@@ -91,7 +91,7 @@ python -m thu_xqh discover --probe-bases 0900,1200,1670 --probe-suffixes 'Z{1..3
 # See the price of a full sweep without paying it
 python -m thu_xqh discover --probe-bases all --dry-run
 #   Probe sweep: 1670 base(s) x 30 suffix(es)
-#   up to 100200 requests, roughly 3340 minute(s) at 2.0s spacing.
+#   up to 100200 requests, roughly 8350 minute(s) at 5.0s spacing.
 ```
 
 `--stop-after-misses N` abandons a base after N consecutive empty suffixes,
@@ -105,7 +105,7 @@ The traffic profile is the main design constraint:
 - **One connection, reused.** No parallelism at all — there is no concurrency
   flag to turn on. ~1700 files over one keep-alive connection means ~1700 fewer
   TCP and TLS handshakes than a naive fetcher.
-- **One request at a time**, spaced `--delay` seconds apart (default 2.0) with
+- **One request at a time**, spaced `--delay` seconds apart (default 5.0) with
   ±25% jitter so the pattern isn't a metronome.
 - **It only ever slows down.** A 429 or 503 doubles the base delay for the rest
   of the run and honours `Retry-After`. The delay never goes back down.
@@ -115,9 +115,9 @@ The traffic profile is the main design constraint:
   exists but should only be used with the site operator's permission.
 - **`--max-requests N`** caps a session so the work can be spread over days.
 
-A full base-range run is ~1670 requests, about **an hour of pure spacing** at
-the default delay, plus transfer time. That is the intended cost. If you are in
-a hurry, be in a hurry somewhere else.
+A full base-range run is ~1670 requests, about **two and a half hours of pure
+spacing** at the default 5s delay, plus transfer time. That is the intended
+cost. If you are in a hurry, be in a hurry somewhere else.
 
 ## What counts as a successful download
 

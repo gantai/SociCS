@@ -24,8 +24,8 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--base-url", default=DEFAULT_BASE_URL)
     common.add_argument(
-        "--delay", type=float, default=2.0,
-        help="seconds between requests, jittered (default: 2.0)",
+        "--delay", type=float, default=5.0,
+        help="seconds between requests, jittered (default: 5.0)",
     )
     common.add_argument("--timeout", type=float, default=45.0)
     common.add_argument("--user-agent", default=DEFAULT_USER_AGENT)
