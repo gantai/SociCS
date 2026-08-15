@@ -593,7 +593,7 @@ class TestCollectionDiscovery(ServerTestCase):
                      "-q", "--registry", registry, "--save"])
         self.assertEqual(code, 0)
         loaded = collib.load_registry(registry)
-        self.assertEqual(set(loaded), {"XQH", "QHZK"})
+        self.assertEqual(set(loaded), set(collib.BUILTIN) | {"QHZK"})
         # The built-in range for XQH must survive a save from the site.
         self.assertEqual((loaded["XQH"].first, loaded["XQH"].last), (1, 1670))
 
@@ -705,6 +705,81 @@ class TestDetailPages(ServerTestCase):
             client, XQH, sorted(catalog.detail_links)[:2], log=lambda m: None
         )
         self.assertEqual(len(found), 2)
+
+
+class TestKnownCollections(unittest.TestCase):
+    """The ranges given for each journal, pinned so a refactor cannot drift."""
+
+    def test_registered_ranges(self):
+        registry = collib.load_registry("/nonexistent.json")
+        self.assertEqual(
+            {c: (registry[c].pdf_dir, registry[c].first, registry[c].last)
+             for c in ("XQH", "QHXK", "QHXXXK")},
+            {
+                "XQH": ("/swfPath/xqh", 1, 1670),
+                "QHXK": ("/swfPath/qhxk", 8, 29),
+                "QHXXXK": ("/swfPath/qhxxxk", 1, 29),
+            },
+        )
+
+    def test_qhxk_starts_at_eight(self):
+        registry = collib.load_registry("/nonexistent.json")
+        qhxk = registry["QHXK"]
+        rng = idlib.base_range(qhxk.first, qhxk.last, qhxk.id_width)
+        self.assertEqual(rng[0], "0008")
+        self.assertEqual(rng[-1], "0029")
+        self.assertEqual(len(rng), 22)
+
+    def test_qhxxxk_range(self):
+        registry = collib.load_registry("/nonexistent.json")
+        c = registry["QHXXXK"]
+        rng = idlib.base_range(c.first, c.last, c.id_width)
+        self.assertEqual((rng[0], rng[-1], len(rng)), ("0001", "0029", 29))
+
+    def test_unknown_sys_id_is_left_out_of_the_url(self):
+        registry = collib.load_registry("/nonexistent.json")
+        url = discover.index_url(registry["QHXK"], "全部", "全部")
+        self.assertNotIn("sysId", url)
+        self.assertNotIn("displayDBName", url)
+        self.assertIn("displayDBCode=QHXK", url)
+
+    def test_known_sys_id_is_included(self):
+        url = discover.index_url(collib.XQH, "全部", "全部")
+        self.assertIn("sysId=23", url)
+
+
+class TestAllCollections(ServerTestCase):
+    def run_cli(self, command, *args):
+        return main([command, "--base-url", self.base_url, "--delay", "0", *args])
+
+    def test_all_downloads_every_registered_collection(self):
+        registry_path = os.path.join(self.tmp.name, "collections.json")
+        collib.save_registry(
+            {"XQH": Collection(code="XQH", name="新清华", sys_id="23", first=1, last=1),
+             "QHZK": Collection(code="QHZK", name="清华周刊", first=7, last=8)},
+            registry_path,
+        )
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+
+        code = self.run_cli("download", "-c", "all", "-q", "--registry", registry_path)
+        self.assertEqual(code, 0)
+        self.assertTrue(os.path.exists(os.path.join("pdfs", "xqh", "0001.pdf")))
+        self.assertTrue(os.path.exists(os.path.join("pdfs", "qhzk", "0007.pdf")))
+        self.assertTrue(os.path.exists(os.path.join("pdfs", "qhzk", "0008.pdf")))
+
+    def test_all_rejects_single_collection_flags(self):
+        for flag in (["--dest", "x"], ["--first", "3"], ["--pdf-dir", "/x"]):
+            with self.subTest(flag=flag):
+                code = self.run_cli("download", "-c", "all", "-q", *flag)
+                self.assertEqual(code, 2)
+
+    def test_all_status_is_read_only(self):
+        Handler.hits = []
+        code = main(["status", "-c", "all", "-q"])
+        self.assertEqual(code, 0)
+        self.assertEqual(Handler.hits, [])
 
 
 if __name__ == "__main__":

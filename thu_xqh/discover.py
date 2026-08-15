@@ -133,12 +133,15 @@ def index_url(
     params = {
         "sysId": collection.sys_id,
         "displayDBCode": collection.code,
-        "displayDBName": collection.name or collection.code,
+        "displayDBName": collection.name,
         "displayyear": year,
         "displaymonth": month,
     }
     if extra:
         params.update(extra)
+    # Send only what we actually know: an empty sysId or display name is a gap
+    # in our knowledge, not a value the site should be asked to match.
+    params = {k: v for k, v in params.items() if v not in (None, "")}
     return f"{INDEX_PATH}?{urllib.parse.urlencode(params)}"
 
 

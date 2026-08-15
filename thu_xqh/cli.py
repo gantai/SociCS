@@ -49,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     picker = argparse.ArgumentParser(add_help=False)
     picker.add_argument(
         "-c", "--collection", default="XQH", metavar="CODE",
-        help="displayDBCode of the journal, e.g. XQH (default: XQH)",
+        help="displayDBCode of the journal, e.g. XQH; 'all' runs every "
+             "collection in the registry (default: XQH)",
     )
     picker.add_argument("--registry", default=collib.DEFAULT_REGISTRY)
     picker.add_argument("--sys-id", default=None, help="override sysId")
@@ -167,33 +168,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         return cmd_collections(args, log)
 
     registry = collib.load_registry(args.registry)
-    collection = collib.resolve(
-        args.collection, registry,
-        sys_id=args.sys_id, name=args.db_name, pdf_dir=args.pdf_dir,
-        id_width=args.id_width, first=args.first, last=args.last,
-        first_year=args.first_year, last_year=args.last_year,
-    )
-    dest = args.dest or os.path.join(DEFAULT_DEST_ROOT, collection.code.lower())
-    manifest_path = args.manifest or os.path.join(dest, "manifest.json")
+    try:
+        targets = _resolve_collections(args, registry, log)
+    except SystemExit as exc:
+        log(str(exc))
+        return 2
 
-    if args.collection.upper() not in registry:
-        log(f"Note: {collection.code} is not in the registry; using defaults derived "
-            f"from the code. Run 'collections' to discover the real settings.")
-    log(f"Collection: {collection.describe()}")
-
-    if args.command == "status":
-        return cmd_status(args, collection, dest, manifest_path, log)
-    if args.command == "verify":
-        return cmd_verify(args, dest, manifest_path, log)
+    if args.command in ("status", "verify"):
+        worst = 0
+        for collection in targets:
+            dest, manifest_path = _paths_for(args, collection)
+            log(f"\n=== {collection.describe()} ===" if len(targets) > 1 else
+                f"Collection: {collection.describe()}")
+            if args.command == "status":
+                code = cmd_status(args, collection, dest, manifest_path, log)
+            else:
+                code = cmd_verify(args, dest, manifest_path, log)
+            worst = max(worst, code)
+        return worst
 
     client = _make_client(args, log)
+    worst = 0
     try:
         with client:
-            if not _robots_ok(client, collection, args, log):
-                return 2
-            if args.command == "discover":
-                return cmd_discover(client, collection, args, log)
-            return cmd_download(client, collection, args, dest, manifest_path, log)
+            for collection in targets:
+                log(f"\n=== {collection.describe()} ===" if len(targets) > 1 else
+                    f"Collection: {collection.describe()}")
+                if not _robots_ok(client, collection, args, log):
+                    return 2
+                dest, manifest_path = _paths_for(args, collection)
+                if args.command == "discover":
+                    code = cmd_discover(client, collection, args, log)
+                else:
+                    code = cmd_download(client, collection, args, dest, manifest_path, log)
+                worst = max(worst, code)
+        return worst
     except KeyboardInterrupt:
         log("\nInterrupted. Progress is saved -- rerun the same command to resume.")
         return 130
@@ -203,6 +212,42 @@ def main(argv: Optional[List[str]] = None) -> int:
     except TransportError as exc:
         log(f"\nStopped: {exc}")
         return 1
+
+
+def _resolve_collections(args, registry, log) -> List[Collection]:
+    """One collection, or every one in the registry for ``-c all``."""
+    requested = (args.collection or "").strip()
+    if requested.lower() != "all":
+        collection = collib.resolve(
+            requested, registry,
+            sys_id=args.sys_id, name=args.db_name, pdf_dir=args.pdf_dir,
+            id_width=args.id_width, first=args.first, last=args.last,
+            first_year=args.first_year, last_year=args.last_year,
+        )
+        if requested.upper() not in registry:
+            log(f"Note: {collection.code} is not in the registry; using defaults "
+                f"derived from the code. Run 'collections' to discover its settings.")
+        return [collection]
+
+    # Per-collection outputs are the whole point of 'all'; a single explicit
+    # path would have every journal overwrite the last one's work.
+    for flag in ("dest", "manifest", "out", "ids"):
+        if getattr(args, flag, None):
+            raise SystemExit(f"--{flag} cannot be combined with '-c all'; "
+                             f"run that collection on its own")
+    for flag in ("sys_id", "db_name", "pdf_dir", "id_width", "first", "last"):
+        if getattr(args, flag, None) is not None:
+            raise SystemExit(f"--{flag.replace('_', '-')} cannot be combined with "
+                             f"'-c all'; it only makes sense for one collection")
+    if not registry:
+        raise SystemExit("the registry is empty; run 'collections --save' first")
+    return [registry[code] for code in sorted(registry)]
+
+
+def _paths_for(args, collection: Collection):
+    dest = args.dest or os.path.join(DEFAULT_DEST_ROOT, collection.code.lower())
+    manifest_path = args.manifest or os.path.join(dest, "manifest.json")
+    return dest, manifest_path
 
 
 def _make_client(args, log) -> PoliteClient:

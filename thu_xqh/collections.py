@@ -4,8 +4,9 @@ The archive holds several publications, selected by ``displayDBCode`` on the
 browse pages and ``dbName`` on the detail pages -- ``XQH`` is 新清华, and the
 PDF directory ``swfPath/xqh/`` is the same code lowercased.
 
-Only XQH is shipped as a known-good entry, because it is the only one whose
-URLs have been seen. The rest are meant to be discovered from the site with
+A collection is shipped as a known-good entry only where its PDF directory and
+issue range have actually been confirmed. Display names and sysIds are left
+blank unless known: anything else is meant to be discovered from the site with
 ``python -m thu_xqh collections`` and cached in a registry file, rather than
 guessed at here and quietly wrong.
 """
@@ -37,7 +38,7 @@ class Collection:
 
     code: str
     name: str = ""
-    sys_id: str = "23"
+    sys_id: str = ""
     pdf_dir: str = ""
     id_width: int = 4
     first: Optional[int] = None
@@ -61,10 +62,12 @@ class Collection:
     def describe(self) -> str:
         span = (f"{self.first}-{self.last}" if self.has_known_range else "range unknown")
         label = f"{self.code} ({self.name})" if self.name else self.code
-        return f"{label}  sysId={self.sys_id}  pdf={self.pdf_dir}  {span}"
+        return f"{label}  sysId={self.sys_id or '?'}  pdf={self.pdf_dir}  {span}"
 
 
-# The one collection whose URLs are confirmed, from the task description.
+# Collections whose PDF directory and issue range have been confirmed. Display
+# names and sysIds are only filled in where they are actually known -- the rest
+# are left blank for `collections` to discover, rather than guessed at here.
 XQH = Collection(
     code="XQH",
     name="新清华",
@@ -77,7 +80,30 @@ XQH = Collection(
     last_year=2006,
 )
 
-BUILTIN: Dict[str, Collection] = {XQH.code: XQH}
+QHXK = Collection(
+    code="QHXK",
+    pdf_dir="/swfPath/qhxk",
+    id_width=4,
+    first=8,
+    last=29,
+    first_year=1911,
+    last_year=1952,
+)
+
+QHXXXK = Collection(
+    code="QHXXXK",
+    pdf_dir="/swfPath/qhxxxk",
+    id_width=4,
+    first=1,
+    last=29,
+    first_year=1911,
+    last_year=1952,
+)
+
+BUILTIN: Dict[str, Collection] = {c.code: c for c in (XQH, QHXK, QHXXXK)}
+
+ALL = "ALL"
+"""``-c all`` -- every collection in the registry."""
 DEFAULT_REGISTRY = "collections.json"
 
 
@@ -163,12 +189,12 @@ def collections_in_html(html: str, base_path: str = "/") -> Dict[str, Collection
         code = code.upper()
         existing = found.get(code)
         if existing is None:
-            found[code] = Collection(code=code, name=name, sys_id=sys_id or "23")
+            found[code] = Collection(code=code, name=name, sys_id=sys_id)
         else:
             # Later links may carry detail the first one lacked.
             if name and not existing.name:
                 existing.name = name
-            if sys_id and existing.sys_id == "23":
+            if sys_id and not existing.sys_id:
                 existing.sys_id = sys_id
     return found
 
