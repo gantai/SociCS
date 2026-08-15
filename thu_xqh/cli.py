@@ -413,8 +413,7 @@ def cmd_discover(client: PoliteClient, collection: Collection, args, log) -> int
         # Default to the full known range: the catalog may be incomplete, and
         # an id that turns out not to exist costs one request and is then
         # remembered as absent.
-        base_ids = set(idlib.base_range(collection.first, collection.last, collection.id_width))
-        all_ids = idlib.sorted_ids(found | base_ids)
+        all_ids = idlib.sorted_ids(found | set(collection.issue_ids()))
 
     out_path = args.out or f"issue-ids-{collection.code.lower()}.txt"
     if not args.dry_run:
@@ -442,7 +441,7 @@ def _resolve_probe_bases(args, collection: Collection, found: set) -> List[str]:
                 f"--probe-bases all needs a known issue range for {collection.code}; "
                 "pass --first and --last"
             )
-        return idlib.base_range(collection.first, collection.last, collection.id_width)
+        return collection.issue_ids()
     if spec == "found":
         return [i for i in idlib.sorted_ids(found) if not idlib.is_supplement(i)]
     if spec.startswith("@"):
@@ -463,6 +462,8 @@ def _write_ids(path: str, all_ids: List[str], collection: Collection) -> None:
     with open(path, "w", encoding="utf-8") as handle:
         handle.write(f"# {collection.code} ({collection.name}) issue ids\n")
         handle.write(f"# pdf directory: {collection.pdf_dir}\n")
+        for series in collection.series():
+            handle.write(f"# series: {series.label()} ({series.count} issues)\n")
         handle.write(f"# {len(all_ids)} ids; supplements carry a letter marker\n")
         for issue_id in all_ids:
             handle.write(issue_id + "\n")
@@ -478,8 +479,9 @@ def cmd_download(
             log(f"No usable ids in {args.ids}")
             return 1
     elif collection.has_known_range:
-        issue_ids = idlib.base_range(collection.first, collection.last, collection.id_width)
-        log(f"No --ids given; using the base range {collection.first}-{collection.last} "
+        issue_ids = collection.issue_ids()
+        spans = " + ".join(s.label() for s in collection.series())
+        log(f"No --ids given; using the known range {spans} "
             "(run 'discover' first to include supplements).")
     else:
         log(f"No --ids given and no known issue range for {collection.code}.\n"
@@ -559,8 +561,8 @@ def cmd_status(args, collection: Collection, dest: str, manifest_path: str, log)
     log(f"  {downloaded} downloaded ({_mb(size)}), {len(supplements)} supplement(s)")
     log(f"  {counts.get(MISSING, 0)} absent, {counts.get(ERROR, 0)} error(s)")
     if collection.has_known_range:
-        expected = collection.last - collection.first + 1
-        log(f"  base range progress: {min(downloaded, expected)}/{expected}")
+        expected = collection.expected_count()
+        log(f"  known range progress: {min(downloaded, expected)}/{expected}")
     if counts.get(ERROR):
         log("  retry with: python -m thu_xqh download --ids <ids file>")
     return 0

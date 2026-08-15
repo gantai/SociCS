@@ -33,6 +33,36 @@ HREF_RE = re.compile(r"""(?:href|src|action)\s*=\s*["']([^"']+)["']""", re.IGNOR
 
 
 @dataclass
+class IdSeries:
+    """A run of issue numbers sharing a filename prefix.
+
+    Some collections keep a second series in the same directory -- 国立清华大学校刊
+    has ``0001.pdf``..``0832.pdf`` alongside ``f0001.pdf``..``f0056.pdf``. They
+    are one publication and one download directory, but two numberings.
+    """
+
+    prefix: str = ""
+    first: int = 1
+    last: int = 1
+    width: int = 4
+
+    @property
+    def count(self) -> int:
+        return max(0, self.last - self.first + 1)
+
+    def ids(self) -> List[str]:
+        return [
+            f"{self.prefix}{str(n).zfill(self.width)}"
+            for n in range(self.first, self.last + 1)
+        ]
+
+    def label(self) -> str:
+        lo = f"{self.prefix}{str(self.first).zfill(self.width)}"
+        hi = f"{self.prefix}{str(self.last).zfill(self.width)}"
+        return f"{lo}-{hi}"
+
+
+@dataclass
 class Collection:
     """One publication on the platform."""
 
@@ -43,6 +73,7 @@ class Collection:
     id_width: int = 4
     first: Optional[int] = None
     last: Optional[int] = None
+    extra_series: List[IdSeries] = field(default_factory=list)
     first_year: int = 1911
     last_year: int = 2006
 
@@ -51,18 +82,51 @@ class Collection:
         if not self.pdf_dir:
             self.pdf_dir = f"/swfPath/{self.code.lower()}"
         self.pdf_dir = "/" + self.pdf_dir.strip("/")
+        # Round-tripping through JSON turns the series back into plain dicts.
+        self.extra_series = [
+            s if isinstance(s, IdSeries) else IdSeries(**s) for s in self.extra_series
+        ]
+
+    @property
+    def has_base_range(self) -> bool:
+        """Whether the main, unprefixed numbering is known."""
+        return self.first is not None and self.last is not None
 
     @property
     def has_known_range(self) -> bool:
-        return self.first is not None and self.last is not None
+        """Whether we can enumerate this collection's issues without asking."""
+        return self.has_base_range or bool(self.extra_series)
+
+    def series(self) -> List[IdSeries]:
+        out: List[IdSeries] = []
+        if self.has_base_range:
+            out.append(IdSeries("", self.first, self.last, self.id_width))
+        out.extend(self.extra_series)
+        return out
+
+    def issue_ids(self) -> List[str]:
+        """Every id this collection is known to hold, across all its series."""
+        seen: List[str] = []
+        known = set()
+        for series in self.series():
+            for issue_id in series.ids():
+                if issue_id not in known:
+                    known.add(issue_id)
+                    seen.append(issue_id)
+        return seen
+
+    def expected_count(self) -> int:
+        return sum(s.count for s in self.series())
 
     def pdf_path(self, issue_id: str) -> str:
         return f"{self.pdf_dir}/{issue_id}.pdf"
 
     def describe(self) -> str:
-        span = (f"{self.first}-{self.last}" if self.has_known_range else "range unknown")
+        parts = [s.label() for s in self.series()]
+        span = " + ".join(parts) if parts else "range unknown"
+        total = f" [{self.expected_count()} files]" if parts else ""
         label = f"{self.code} ({self.name})" if self.name else self.code
-        return f"{label}  sysId={self.sys_id or '?'}  pdf={self.pdf_dir}  {span}"
+        return f"{label}  sysId={self.sys_id or '?'}  pdf={self.pdf_dir}  {span}{total}"
 
 
 # Collections whose PDF directory and issue range have been confirmed. Display
@@ -85,7 +149,7 @@ QHXK = Collection(
     pdf_dir="/swfPath/qhxk",
     id_width=4,
     first=8,
-    last=29,
+    last=32,
     first_year=1911,
     last_year=1952,
 )
@@ -95,12 +159,36 @@ QHXXXK = Collection(
     pdf_dir="/swfPath/qhxxxk",
     id_width=4,
     first=1,
-    last=29,
+    last=36,
     first_year=1911,
     last_year=1952,
 )
 
-BUILTIN: Dict[str, Collection] = {c.code: c for c in (XQH, QHXK, QHXXXK)}
+# Two series in one directory: the main run, plus an "f" series.
+GLQHDXXK = Collection(
+    code="GLQHDXXK",
+    pdf_dir="/swfPath/glqhdxxk",
+    id_width=4,
+    first=1,
+    last=832,
+    extra_series=[IdSeries(prefix="f", first=1, last=56, width=4)],
+    first_year=1928,
+    last_year=1949,
+)
+
+RMQH = Collection(
+    code="RMQH",
+    pdf_dir="/swfPath/rmqh",
+    id_width=4,
+    first=1,
+    last=24,
+    first_year=1950,
+    last_year=1952,
+)
+
+BUILTIN: Dict[str, Collection] = {
+    c.code: c for c in (XQH, QHXK, QHXXXK, GLQHDXXK, RMQH)
+}
 
 ALL = "ALL"
 """``-c all`` -- every collection in the registry."""

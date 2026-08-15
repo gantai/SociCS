@@ -46,19 +46,43 @@ is ever fetched twice.
 
 ## Collections
 
-`-c/--collection` takes the `displayDBCode` from the browse URL. Three ship
-with confirmed PDF directories and issue ranges:
+`-c/--collection` takes the `displayDBCode` from the browse URL. Five ship with
+confirmed PDF directories and issue ranges — **2643 files in total**:
 
 | Code | PDF directory | Issues | Count |
 |---|---|---|---|
 | `XQH` | `/swfPath/xqh/` | `0001`–`1670` (+ supplements) | 1670 |
-| `QHXK` | `/swfPath/qhxk/` | `0008`–`0029` | 22 |
-| `QHXXXK` | `/swfPath/qhxxxk/` | `0001`–`0029` | 29 |
+| `GLQHDXXK` | `/swfPath/glqhdxxk/` | `0001`–`0832` **and** `f0001`–`f0056` | 888 |
+| `QHXXXK` | `/swfPath/qhxxxk/` | `0001`–`0036` | 36 |
+| `QHXK` | `/swfPath/qhxk/` | `0008`–`0032` | 25 |
+| `RMQH` | `/swfPath/rmqh/` | `0001`–`0024` | 24 |
 
-Only XQH has a confirmed display name (新清华) and `sysId`. For the other two
-those fields are left blank rather than guessed — the download path does not
-need them, and `collections` fills them in from the site. An empty field is
-simply omitted from the index URL rather than sent as a wrong value.
+Only XQH has a confirmed display name (新清华) and `sysId`. For the others those
+fields are left blank rather than guessed — the download path does not need
+them, and `collections` fills them in from the site. An empty field is simply
+omitted from the index URL rather than sent as a wrong value.
+
+### Two series in one directory
+
+`GLQHDXXK` keeps a second, `f`-prefixed run of issues in the same directory as
+its main one. A collection therefore holds a *list* of id series, not a single
+range, and `issue_ids()` walks all of them:
+
+```
+/swfPath/glqhdxxk/0832.pdf     main series, 832 issues
+/swfPath/glqhdxxk/f0001.pdf    f series, 56 issues
+```
+
+The prefix is **not** treated as a supplement marker — `f0001` is a parallel
+run of issues, not a supplement to issue 1. Ids also keep their case: folding
+`f0001` to `F0001` would be a different path on a case-sensitive server.
+
+Add another series to any collection through the registry file:
+
+```json
+{"code": "GLQHDXXK", "first": 1, "last": 832,
+ "extra_series": [{"prefix": "f", "first": 1, "last": 56, "width": 4}]}
+```
 
 ```bash
 python3 -m thu_xqh collections            # ask the site, print what it finds
@@ -66,11 +90,13 @@ python3 -m thu_xqh collections --save     # ...and cache it in collections.json
 python3 -m thu_xqh collections --offline  # just show the cache
 ```
 
-Because QHXK and QHXXXK have known ranges, they need no discovery at all:
+All five have known ranges, so they need no discovery at all — the catalog
+walk exists to find issues you do not already know about:
 
 ```bash
-python3 -m thu_xqh download -c QHXK      # 22 files
-python3 -m thu_xqh download -c QHXXXK    # 29 files
+python3 -m thu_xqh download -c RMQH       # 24 files
+python3 -m thu_xqh download -c QHXK       # 25 files
+python3 -m thu_xqh download -c GLQHDXXK   # 888, both series
 ```
 
 ### Everything at once
@@ -183,10 +209,10 @@ The traffic profile is the main design constraint:
 - **`robots.txt` is checked** before anything else and respected.
 - **`--max-requests N`** caps a session so the work can be spread over days.
 
-A full XQH run is ~1670 requests, about **two and a half hours of pure spacing**
-at the default 5s delay, plus transfer time. QHXK and QHXXXK are trivial by
-comparison — 22 and 29 files, a few minutes each. Adding `--follow-details`
-roughly doubles a collection's cost. Check before starting:
+The whole platform is ~2643 requests: about **3.7 hours of pure spacing** at the
+default 5s delay, plus transfer time. XQH is 2.3h of that and GLQHDXXK 1.2h;
+the other three are minutes each. Adding `--follow-details` roughly doubles a
+collection's cost. Check before starting:
 
 ```bash
 python3 -m thu_xqh download -c all --dry-run
@@ -235,12 +261,13 @@ Collection picker (on `discover`, `download`, `verify`, `status`):
 
 ## Verification status
 
-The test suite (`python3 -m unittest discover -s tests`, 60 tests) runs against
+The test suite (`python3 -m unittest discover -s tests`, 66 tests) runs against
 a local stand-in server covering two collections, paginated index pages,
 detail-page-only indexes, real PDFs, plain 404s, HTML-error-pages-with-status-200,
 `HEAD`-rejecting servers, truncated PDFs, per-collection manifest isolation,
-request budgets, `-c all` fan-out, and resume behaviour. The issue range of
-each registered collection is pinned by a test so a refactor cannot drift it.
+request budgets, `-c all` fan-out, and resume behaviour. The directory and
+issue range of every registered collection are pinned by a test, so a refactor
+cannot drift them silently.
 
 **The code has not been run against the live site.** The network policy of the
 environment it was written in blocks `thujournal.lib.tsinghua.edu.cn` outright,

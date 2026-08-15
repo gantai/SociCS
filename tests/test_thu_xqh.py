@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import unittest.mock
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -197,8 +198,11 @@ class ServerTestCase(unittest.TestCase):
 
 class TestIds(unittest.TestCase):
     def test_normalize_and_split(self):
-        self.assertEqual(idlib.normalize("1670z22"), "1670Z22")
+        # Case is preserved, not folded: a lowercase path is a different URL.
+        self.assertEqual(idlib.normalize("1670z22"), "1670z22")
+        self.assertEqual(idlib.normalize("1670Z22"), "1670Z22")
         self.assertEqual(idlib.normalize(" 0001 "), "0001")
+        self.assertIsNone(idlib.normalize("f0001"))  # prefixed: not a plain id
         self.assertIsNone(idlib.normalize("123"))
         self.assertIsNone(idlib.normalize("abcd"))
         self.assertIsNone(idlib.normalize("1670ZZ2"))
@@ -710,35 +714,68 @@ class TestDetailPages(ServerTestCase):
 class TestKnownCollections(unittest.TestCase):
     """The ranges given for each journal, pinned so a refactor cannot drift."""
 
-    def test_registered_ranges(self):
-        registry = collib.load_registry("/nonexistent.json")
-        self.assertEqual(
-            {c: (registry[c].pdf_dir, registry[c].first, registry[c].last)
-             for c in ("XQH", "QHXK", "QHXXXK")},
-            {
-                "XQH": ("/swfPath/xqh", 1, 1670),
-                "QHXK": ("/swfPath/qhxk", 8, 29),
-                "QHXXXK": ("/swfPath/qhxxxk", 1, 29),
-            },
-        )
+    def setUp(self):
+        self.registry = collib.load_registry("/nonexistent.json")
+
+    def test_registered_directories_and_ranges(self):
+        actual = {
+            code: (c.pdf_dir, c.first, c.last, c.expected_count())
+            for code, c in self.registry.items()
+        }
+        self.assertEqual(actual, {
+            "XQH":      ("/swfPath/xqh",      1, 1670, 1670),
+            "QHXK":     ("/swfPath/qhxk",     8,   32,   25),
+            "QHXXXK":   ("/swfPath/qhxxxk",   1,   36,   36),
+            "GLQHDXXK": ("/swfPath/glqhdxxk", 1,  832,  888),  # 832 + 56 in the f series
+            "RMQH":     ("/swfPath/rmqh",     1,   24,   24),
+        })
 
     def test_qhxk_starts_at_eight(self):
-        registry = collib.load_registry("/nonexistent.json")
-        qhxk = registry["QHXK"]
-        rng = idlib.base_range(qhxk.first, qhxk.last, qhxk.id_width)
-        self.assertEqual(rng[0], "0008")
-        self.assertEqual(rng[-1], "0029")
-        self.assertEqual(len(rng), 22)
+        ids = self.registry["QHXK"].issue_ids()
+        self.assertEqual((ids[0], ids[-1], len(ids)), ("0008", "0032", 25))
 
     def test_qhxxxk_range(self):
-        registry = collib.load_registry("/nonexistent.json")
-        c = registry["QHXXXK"]
-        rng = idlib.base_range(c.first, c.last, c.id_width)
-        self.assertEqual((rng[0], rng[-1], len(rng)), ("0001", "0029", 29))
+        ids = self.registry["QHXXXK"].issue_ids()
+        self.assertEqual((ids[0], ids[-1], len(ids)), ("0001", "0036", 36))
+
+    def test_rmqh_range(self):
+        ids = self.registry["RMQH"].issue_ids()
+        self.assertEqual((ids[0], ids[-1], len(ids)), ("0001", "0024", 24))
+
+    def test_glqhdxxk_carries_two_series_in_one_directory(self):
+        collection = self.registry["GLQHDXXK"]
+        ids = collection.issue_ids()
+        self.assertEqual(len(ids), 888)
+        self.assertEqual(ids[0], "0001")
+        self.assertEqual(ids[831], "0832")
+        self.assertEqual(ids[832], "f0001")
+        self.assertEqual(ids[-1], "f0056")
+        # Both series resolve into the same remote directory.
+        self.assertEqual(collection.pdf_path("0832"), "/swfPath/glqhdxxk/0832.pdf")
+        self.assertEqual(collection.pdf_path("f0001"), "/swfPath/glqhdxxk/f0001.pdf")
+
+    def test_f_series_keeps_its_lowercase(self):
+        """A case-folded id would be a different path on a strict server."""
+        for issue_id in self.registry["GLQHDXXK"].issue_ids():
+            self.assertEqual(issue_id, issue_id.lower())
+        self.assertEqual(idlib.normalize_href_id("f0001"), "f0001")
+        self.assertEqual(list(idlib.iter_id_file("f0001\nF0002\n")), ["f0001", "F0002"])
+
+    def test_f_prefix_is_not_a_supplement_marker(self):
+        self.assertFalse(idlib.is_supplement("f0001"))
+        self.assertTrue(idlib.is_supplement("1670Z22"))
+
+    def test_series_round_trip_through_the_registry_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "collections.json")
+            collib.save_registry(self.registry, path)
+            reloaded = collib.load_registry(path)
+            self.assertEqual(reloaded["GLQHDXXK"].issue_ids(),
+                             self.registry["GLQHDXXK"].issue_ids())
+            self.assertIsInstance(reloaded["GLQHDXXK"].extra_series[0], collib.IdSeries)
 
     def test_unknown_sys_id_is_left_out_of_the_url(self):
-        registry = collib.load_registry("/nonexistent.json")
-        url = discover.index_url(registry["QHXK"], "全部", "全部")
+        url = discover.index_url(self.registry["QHXK"], "全部", "全部")
         self.assertNotIn("sysId", url)
         self.assertNotIn("displayDBName", url)
         self.assertIn("displayDBCode=QHXK", url)
@@ -753,12 +790,14 @@ class TestAllCollections(ServerTestCase):
         return main([command, "--base-url", self.base_url, "--delay", "0", *args])
 
     def test_all_downloads_every_registered_collection(self):
+        # Scoped to two small collections: load_registry always overlays the
+        # built-ins, so an unpatched 'all' would pull the real ~2600 files.
+        small = {
+            "XQH": Collection(code="XQH", name="新清华", sys_id="23", first=1, last=1),
+            "QHZK": Collection(code="QHZK", name="清华周刊", first=7, last=8),
+        }
+        self.enterContext(unittest.mock.patch.dict(collib.BUILTIN, small, clear=True))
         registry_path = os.path.join(self.tmp.name, "collections.json")
-        collib.save_registry(
-            {"XQH": Collection(code="XQH", name="新清华", sys_id="23", first=1, last=1),
-             "QHZK": Collection(code="QHZK", name="清华周刊", first=7, last=8)},
-            registry_path,
-        )
         cwd = os.getcwd()
         os.chdir(self.tmp.name)
         self.addCleanup(os.chdir, cwd)
@@ -774,6 +813,12 @@ class TestAllCollections(ServerTestCase):
             with self.subTest(flag=flag):
                 code = self.run_cli("download", "-c", "all", "-q", *flag)
                 self.assertEqual(code, 2)
+
+    def test_all_covers_every_builtin_without_touching_the_network(self):
+        Handler.hits = []
+        code = main(["download", "-c", "all", "-q", "--dry-run"])
+        self.assertEqual(code, 0)
+        self.assertEqual([h for h in Handler.hits if h.endswith(".pdf")], [])
 
     def test_all_status_is_read_only(self):
         Handler.hits = []

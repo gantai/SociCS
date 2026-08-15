@@ -15,66 +15,84 @@ BASE_WIDTH = 4
 DEFAULT_FIRST = 1
 DEFAULT_LAST = 1670
 
-# 4 digits, optionally followed by a letter marker and up to three digits.
-ID_RE = re.compile(r"^(\d{4})([A-Z]\d{0,3})?$")
-
-# The same idea without a fixed width, for collections whose numbering we have
-# not seen, and for ids read straight out of a PDF link.
-GENERAL_ID_RE = re.compile(r"^(\d+)([A-Z][A-Z0-9]{0,4})?$")
+# The full shape of an id: an optional letter prefix (``f0001`` -- a separate
+# series sharing a collection's directory), the issue number, and an optional
+# supplement marker (``1670Z22``).
+#
+# Case is preserved throughout. An earlier version uppercased ids to collapse
+# duplicates, which is wrong the moment a real path is lowercase: ``f0001.pdf``
+# is not ``F0001.pdf`` to a case-sensitive server.
+FULL_ID_RE = re.compile(
+    r"^(?P<prefix>[A-Za-z]{0,3})(?P<num>\d{1,8})(?P<suffix>[A-Za-z]\d{0,3})?$"
+)
 
 # Used when scraping: the same shape, but anchored on word boundaries so we can
 # pull ids out of surrounding HTML/JS without dragging in neighbouring text.
 ID_IN_TEXT_RE = re.compile(r"(?<![0-9A-Za-z])(\d{4}(?:[A-Za-z]\d{0,3})?)(?![0-9A-Za-z])")
 
 
-def format_base(number: int, width: int = BASE_WIDTH) -> str:
-    return str(number).zfill(width)
+def format_base(number: int, width: int = BASE_WIDTH, prefix: str = "") -> str:
+    return f"{prefix}{str(number).zfill(width)}"
 
 
 def base_range(
-    first: int = DEFAULT_FIRST, last: int = DEFAULT_LAST, width: int = BASE_WIDTH
+    first: int = DEFAULT_FIRST,
+    last: int = DEFAULT_LAST,
+    width: int = BASE_WIDTH,
+    prefix: str = "",
 ) -> List[str]:
     if first < 1 or last < first:
         raise ValueError(f"invalid range {first}..{last}")
-    return [format_base(n, width) for n in range(first, last + 1)]
+    return [format_base(n, width, prefix) for n in range(first, last + 1)]
 
 
 def normalize(raw: str, width: int = BASE_WIDTH) -> Optional[str]:
-    """Canonicalise an id of a known width, or return None if it is not one.
+    """Canonicalise a plain issue id of a known width, or None if it is not one.
 
-    Uppercases the supplement marker so ``1670z22`` and ``1670Z22`` collapse to
-    a single identity.
+    Rejects prefixed ids: this sifts loose page text, where a token like
+    ``f0001`` is far more likely to be markup than an issue.
     """
-    candidate = raw.strip().upper()
-    if width == BASE_WIDTH:
-        return candidate if ID_RE.match(candidate) else None
-    match = GENERAL_ID_RE.match(candidate)
-    if not match or len(match.group(1)) != width:
+    candidate = raw.strip()
+    match = FULL_ID_RE.match(candidate)
+    if not match or match.group("prefix"):
+        return None
+    if len(match.group("num")) != width:
         return None
     return candidate
 
 
 def normalize_href_id(raw: str) -> Optional[str]:
-    """Canonicalise an id read from an actual PDF link.
+    """Canonicalise an id read from an actual PDF link or an id file.
 
-    Deliberately lenient about width: this came from a real ``….pdf`` href, so
-    it is an issue whether or not it matches the numbering we expected.
+    Lenient about width and prefix: this came from a real ``….pdf`` path, so it
+    is an issue whether or not it matches the numbering we expected.
     """
-    candidate = raw.strip().upper()
-    if not GENERAL_ID_RE.match(candidate) or len(candidate) > 16:
+    candidate = raw.strip()
+    if not candidate or len(candidate) > 16 or not FULL_ID_RE.match(candidate):
         return None
     return candidate
 
 
-def split_id(issue_id: str) -> Tuple[int, str]:
-    """``"1670Z22"`` -> ``(1670, "Z22")``; ``"0001"`` -> ``(1, "")``."""
-    match = GENERAL_ID_RE.match(issue_id.upper())
+def parse_id(issue_id: str) -> Tuple[str, int, str]:
+    """``"f0001"`` -> ``("f", 1, "")``; ``"1670Z22"`` -> ``("", 1670, "Z22")``."""
+    match = FULL_ID_RE.match(issue_id.strip())
     if not match:
         raise ValueError(f"not an issue id: {issue_id!r}")
-    return int(match.group(1)), match.group(2) or ""
+    return match.group("prefix"), int(match.group("num")), match.group("suffix") or ""
+
+
+def split_id(issue_id: str) -> Tuple[int, str]:
+    """``"1670Z22"`` -> ``(1670, "Z22")``; ``"0001"`` -> ``(1, "")``."""
+    _, number, suffix = parse_id(issue_id)
+    return number, suffix
 
 
 def is_supplement(issue_id: str) -> bool:
+    """Whether the id carries a trailing supplement marker.
+
+    The leading prefix of a series like ``f0001`` is not a marker -- that is a
+    parallel run of issues, not a supplement to any one of them.
+    """
     return bool(split_id(issue_id)[1])
 
 
@@ -101,12 +119,12 @@ def in_range(
     return True
 
 
-def sort_key(issue_id: str) -> Tuple[int, str]:
+def sort_key(issue_id: str) -> Tuple[str, int, str]:
     try:
-        base, suffix = split_id(issue_id)
+        prefix, number, suffix = parse_id(issue_id)
     except ValueError:
-        return 10 ** 12, issue_id
-    return base, suffix
+        return "\uffff", 10 ** 12, issue_id
+    return prefix.lower(), number, suffix
 
 
 def sorted_ids(ids: Iterable[str]) -> List[str]:
