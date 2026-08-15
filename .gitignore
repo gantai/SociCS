@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+pdfs/
+debug/
+issue-ids.txt
+retry-ids.txt
+manifest.json
