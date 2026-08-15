@@ -17,7 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from thu_xqh import discover, ids as idlib  # noqa: E402
+from thu_xqh import collections as collib, discover, ids as idlib  # noqa: E402
+from thu_xqh.collections import Collection  # noqa: E402
 from thu_xqh.cli import main  # noqa: E402
 from thu_xqh.client import PoliteClient, RateLimiter  # noqa: E402
 from thu_xqh.download import download_one, probe  # noqa: E402
@@ -28,15 +29,30 @@ TRUNCATED_PDF = b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\n"
 NOT_FOUND_HTML = b"<html><body><h1>404</h1><p>the requested issue does not exist</p></body></html>"
 
 EXISTING = {
-    "0001": PDF_BODY,
-    "0004": PDF_BODY,
-    "1670": PDF_BODY,
-    "1670Z22": PDF_BODY,
-    "0900": TRUNCATED_PDF,
+    "xqh": {
+        "0001": PDF_BODY,
+        "0004": PDF_BODY,
+        "1670": PDF_BODY,
+        "1670Z22": PDF_BODY,
+        "0900": TRUNCATED_PDF,
+    },
+    # A second journal, to prove nothing is hardcoded to XQH.
+    "qhzk": {"0007": PDF_BODY, "0008": PDF_BODY},
 }
-# Ids the index knows about, in listing order.
-INDEXED = ["0001", "0004", "0900", "1670", "1670Z22"]
+# Ids each index knows about, in listing order.
+INDEXED = {
+    "XQH": ["0001", "0004", "0900", "1670", "1670Z22"],
+    "QHZK": ["0007", "0008"],
+}
 PAGE_SIZE = 2
+
+XQH = collib.XQH
+QHZK = Collection(code="QHZK", name="清华周刊", sys_id="24", first=1, last=8,
+                  first_year=1953, last_year=1954)
+
+# When true the index links only to detail pages, never straight to a PDF --
+# the shape the live site is suspected to use.
+DETAIL_ONLY = {"value": False}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -64,11 +80,12 @@ class Handler(BaseHTTPRequestHandler):
         if parts.path == "/robots.txt":
             return self._send(200, b"User-agent: *\nAllow: /\n", "text/plain", head_only)
 
-        if parts.path.startswith("/swfPath/xqh/") and parts.path.endswith(".pdf"):
-            issue_id = parts.path.rsplit("/", 1)[1][: -len(".pdf")]
+        if parts.path.startswith("/swfPath/") and parts.path.endswith(".pdf"):
+            _, _, code, filename = parts.path.split("/", 3)
+            issue_id = filename[: -len(".pdf")]
             if issue_id == "0003":  # 200 + HTML: the trap
                 return self._send(200, NOT_FOUND_HTML, "text/html", head_only)
-            body = EXISTING.get(issue_id)
+            body = EXISTING.get(code, {}).get(issue_id)
             if body is None:
                 return self._send(404, NOT_FOUND_HTML, "text/html", head_only)
             requested = self.headers.get("Range")
@@ -84,26 +101,58 @@ class Handler(BaseHTTPRequestHandler):
                 return None
             return self._send(200, body, "application/pdf", head_only)
 
-        if parts.path == discover.INDEX_PATH:
+        if parts.path == collib.INDEX_PATH:
             return self._send(200, self._index_page(parts.query), "text/html; charset=utf-8",
                               head_only)
 
+        if parts.path in ("/", collib.FIRST_INDEX_PATH):
+            return self._send(200, self._home_page(), "text/html; charset=utf-8", head_only)
+
+        if parts.path.lower() == "/detaliswfinfo":
+            return self._send(200, self._detail_page(parts.query),
+                              "text/html; charset=utf-8", head_only)
+
         return self._send(404, b"nope", "text/plain", head_only)
+
+    def _home_page(self) -> bytes:
+        rows = "".join(
+            f'<a href="{collib.INDEX_PATH}?sysId={c.sys_id}&amp;displayDBCode={c.code}'
+            f'&amp;displayDBName={urllib.parse.quote(c.name)}">{c.name}</a>'
+            for c in (XQH, QHZK)
+        )
+        return f"<html><body><nav>{rows}</nav></body></html>".encode("utf-8")
+
+    def _detail_page(self, query: str) -> bytes:
+        params = urllib.parse.parse_qs(query)
+        code = (params.get("dbName", ["XQH"])[0]).upper()
+        issue_id = params.get("issue", [""])[0]
+        link = f'<a href="/swfPath/{code.lower()}/{issue_id}.pdf">full text</a>'
+        return f"<html><body><h1>{issue_id}</h1>{link}</body></html>".encode("utf-8")
 
     def _index_page(self, query: str) -> bytes:
         params = urllib.parse.parse_qs(query)
+        code = (params.get("displayDBCode", ["XQH"])[0]).upper()
+        listed = INDEXED.get(code, [])
         page = int(params.get("page", ["1"])[0])
         start = (page - 1) * PAGE_SIZE
-        chunk = INDEXED[start : start + PAGE_SIZE]
-        rows = "".join(
-            f'<li><a href="/swfPath/xqh/{i}.pdf">issue {i}</a></li>' for i in chunk
-        )
+        chunk = listed[start : start + PAGE_SIZE]
+        if DETAIL_ONLY["value"]:
+            rows = "".join(
+                f'<li><a href="/DetaliSwfInfo?dbName={code}&amp;sysID=13571{n}'
+                f'&amp;issue={i}">issue</a></li>'
+                for n, i in enumerate(chunk)
+            )
+        else:
+            rows = "".join(
+                f'<li><a href="/swfPath/{code.lower()}/{i}.pdf">issue {i}</a></li>'
+                for i in chunk
+            )
         base = {k: v[0] for k, v in params.items()}
         links = ""
-        total_pages = (len(INDEXED) + PAGE_SIZE - 1) // PAGE_SIZE
+        total_pages = max(1, (len(listed) + PAGE_SIZE - 1) // PAGE_SIZE)
         for n in range(1, total_pages + 1):
             nav = dict(base, page=str(n))
-            links += (f'<a href="{discover.INDEX_PATH}?'
+            links += (f'<a href="{collib.INDEX_PATH}?'
                       f'{urllib.parse.urlencode(nav)}">{n}</a> ')
         # Stray four-digit numbers, exactly like a real page has.
         noise = '<span class="count">1953</span><div id="0002x"></div>'
@@ -135,6 +184,7 @@ class ServerTestCase(unittest.TestCase):
     def setUp(self):
         Handler.reject_head = False
         Handler.hits = []
+        DETAIL_ONLY["value"] = False
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
@@ -195,12 +245,12 @@ class TestExtraction(unittest.TestCase):
             '<a href="/QHHome/Detail?id=0004">y</a>'
             '<span>1953</span>'
         )
-        confirmed, candidates = discover.extract_ids(html, 1, 1670)
+        confirmed, candidates = discover.extract_ids(html, XQH)
         self.assertEqual(confirmed, {"1670Z22"})
         self.assertEqual(candidates, {"0004"})  # 1953 is out of range, dropped
 
     def test_case_insensitive_href(self):
-        confirmed, _ = discover.extract_ids('<a href="/SWFPATH/XQH/0001.PDF">x</a>', 1, 1670)
+        confirmed, _ = discover.extract_ids('<a href="/SWFPATH/XQH/0001.PDF">x</a>', XQH)
         self.assertEqual(confirmed, {"0001"})
 
 
@@ -257,7 +307,7 @@ class TestManifest(unittest.TestCase):
 class TestDownload(ServerTestCase):
     def test_downloads_a_real_pdf(self):
         client = self.client()
-        entry = download_one(client, "0001", self.tmp.name)
+        entry = download_one(client, XQH, "0001", self.tmp.name)
         self.assertEqual(entry.status, OK)
         self.assertEqual(entry.size, len(PDF_BODY))
         self.assertTrue(entry.sha256)
@@ -266,51 +316,51 @@ class TestDownload(ServerTestCase):
             self.assertEqual(handle.read(), PDF_BODY)
 
     def test_downloads_a_supplement(self):
-        entry = download_one(self.client(), "1670Z22", self.tmp.name)
+        entry = download_one(self.client(), XQH, "1670Z22", self.tmp.name)
         self.assertEqual(entry.status, OK)
         self.assertTrue(os.path.exists(os.path.join(self.tmp.name, "1670Z22.pdf")))
 
     def test_404_is_recorded_as_absent_with_no_file_left_behind(self):
-        entry = download_one(self.client(), "0002", self.tmp.name)
+        entry = download_one(self.client(), XQH, "0002", self.tmp.name)
         self.assertEqual(entry.status, MISSING)
         self.assertEqual(os.listdir(self.tmp.name), [])
 
     def test_html_error_page_with_status_200_is_not_saved(self):
-        entry = download_one(self.client(), "0003", self.tmp.name)
+        entry = download_one(self.client(), XQH, "0003", self.tmp.name)
         self.assertEqual(entry.status, MISSING)
         self.assertIn("not a PDF", entry.note)
         self.assertEqual(os.listdir(self.tmp.name), [])
 
     def test_pdf_without_eof_is_kept_but_flagged(self):
-        entry = download_one(self.client(), "0900", self.tmp.name)
+        entry = download_one(self.client(), XQH, "0900", self.tmp.name)
         self.assertEqual(entry.status, OK)
         self.assertIn("EOF", entry.note)
 
     def test_no_part_files_survive(self):
         client = self.client()
         for issue_id in ("0001", "0002", "0003"):
-            download_one(client, issue_id, self.tmp.name)
+            download_one(client, XQH, issue_id, self.tmp.name)
         self.assertFalse([f for f in os.listdir(self.tmp.name) if f.endswith(".part")])
 
 
 class TestProbe(ServerTestCase):
     def test_head_probe(self):
         client = self.client()
-        self.assertIs(probe(client, "1670Z22"), True)
-        self.assertIs(probe(client, "0002"), False)
-        self.assertIs(probe(client, "0003"), False)  # HTML content type
+        self.assertIs(probe(client, XQH, "1670Z22"), True)
+        self.assertIs(probe(client, XQH, "0002"), False)
+        self.assertIs(probe(client, XQH, "0003"), False)  # HTML content type
 
     def test_falls_back_to_ranged_get_when_head_is_rejected(self):
         Handler.reject_head = True
         client = self.client()
-        self.assertIs(probe(client, "1670Z22"), True)
-        self.assertIs(probe(client, "0002"), False)
+        self.assertIs(probe(client, XQH, "1670Z22"), True)
+        self.assertIs(probe(client, XQH, "0002"), False)
         self.assertTrue(any("Range" for h in Handler.hits))
 
     def test_probe_sweep_stops_after_misses(self):
         client = self.client()
         found = discover.probe_supplements(
-            client, ["1670"], idlib.parse_suffix_spec("Z{1..30}"),
+            client, XQH, ["1670"], idlib.parse_suffix_spec("Z{1..30}"),
             stop_after_misses=3, log=lambda m: None,
         )
         self.assertEqual(found, [])
@@ -320,7 +370,7 @@ class TestProbe(ServerTestCase):
     def test_probe_sweep_finds_the_supplement(self):
         client = self.client()
         found = discover.probe_supplements(
-            client, ["1670"], ["Z21", "Z22", "Z23"], log=lambda m: None
+            client, XQH, ["1670"], ["Z21", "Z22", "Z23"], log=lambda m: None
         )
         self.assertEqual(found, ["1670Z22"])
 
@@ -328,25 +378,25 @@ class TestProbe(ServerTestCase):
 class TestCatalog(ServerTestCase):
     def test_catalog_walk_follows_pagination_and_finds_everything(self):
         catalog = discover.catalog_scan(
-            self.client(), first=1, last=1670, coverage_target=0.0,
+            self.client(), XQH, coverage_target=0.0,
             max_level="all", log=lambda m: None,
         )
-        self.assertEqual(catalog.confirmed, set(INDEXED))
+        self.assertEqual(catalog.confirmed, set(INDEXED["XQH"]))
         self.assertEqual(catalog.supplements(), ["1670Z22"])
         self.assertGreater(catalog.pages_fetched, 1)
 
     def test_catalog_escalates_when_coverage_is_short(self):
         catalog = discover.catalog_scan(
-            self.client(), first=1, last=5, coverage_target=0.99,
-            first_year=1953, last_year=1954, max_level="month",
-            log=lambda m: None,
+            self.client(), Collection(code="XQH", name="新清华", first=1, last=5,
+                                      first_year=1953, last_year=1954),
+            coverage_target=0.99, max_level="month", log=lambda m: None,
         )
         # Coverage can never be met here, so it must have tried both levels.
         self.assertEqual(catalog.levels_tried, ["all", "month"])
 
     def test_catalog_stops_at_the_cheapest_sufficient_level(self):
         catalog = discover.catalog_scan(
-            self.client(), first=1, last=1670, coverage_target=0.0,
+            self.client(), XQH, coverage_target=0.0,
             max_level="year-month", log=lambda m: None,
         )
         self.assertEqual(catalog.levels_tried, ["all"])
@@ -483,6 +533,178 @@ class TestRobots(ServerTestCase):
         Handler.do_GET = blocking_get
         self.addCleanup(setattr, Handler, "do_GET", original)
         self.assertFalse(client.robots_allows("/swfPath/xqh/0001.pdf"))
+
+
+class TestCollections(unittest.TestCase):
+    def test_pdf_dir_derives_from_code(self):
+        self.assertEqual(Collection(code="qhzk").pdf_dir, "/swfPath/qhzk")
+        self.assertEqual(Collection(code="QHZK").code, "QHZK")
+        self.assertEqual(Collection(code="X", pdf_dir="swfPath/custom/").pdf_dir,
+                         "/swfPath/custom")
+
+    def test_pdf_path(self):
+        self.assertEqual(XQH.pdf_path("1670Z22"), "/swfPath/xqh/1670Z22.pdf")
+        self.assertEqual(QHZK.pdf_path("0007"), "/swfPath/qhzk/0007.pdf")
+
+    def test_unknown_code_resolves_with_derived_defaults(self):
+        registry = collib.load_registry("/nonexistent.json")
+        resolved = collib.resolve("NEWJ", registry)
+        self.assertEqual(resolved.pdf_dir, "/swfPath/newj")
+        self.assertFalse(resolved.has_known_range)
+
+    def test_overrides_win(self):
+        registry = collib.load_registry("/nonexistent.json")
+        resolved = collib.resolve("XQH", registry, first=5, last=9, sys_id="99")
+        self.assertEqual((resolved.first, resolved.last, resolved.sys_id), (5, 9, "99"))
+        self.assertEqual(resolved.name, "新清华")  # untouched by the override
+
+    def test_registry_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "collections.json")
+            collib.save_registry({"QHZK": QHZK}, path)
+            loaded = collib.load_registry(path)
+            self.assertIn("QHZK", loaded)
+            self.assertIn("XQH", loaded)  # built-in survives
+            self.assertEqual(loaded["QHZK"].name, "清华周刊")
+
+    def test_reads_codes_out_of_links(self):
+        html = (
+            '<a href="/QHHome/SecondIndex?sysId=23&amp;displayDBCode=XQH'
+            '&amp;displayDBName=%E6%96%B0%E6%B8%85%E5%8D%8E">x</a>'
+            '<a href="/DetaliSwfInfo?dbName=QHZK&amp;sysID=135717">y</a>'
+            '<a href="/about">z</a>'
+        )
+        found = collib.collections_in_html(html)
+        self.assertEqual(set(found), {"XQH", "QHZK"})
+        self.assertEqual(found["XQH"].name, "新清华")
+        self.assertEqual(found["XQH"].sys_id, "23")
+
+
+class TestCollectionDiscovery(ServerTestCase):
+    def test_finds_both_journals_on_the_home_page(self):
+        found = collib.discover_collections(self.client(), log=lambda m: None)
+        self.assertEqual(set(found), {"XQH", "QHZK"})
+        self.assertEqual(found["QHZK"].name, "清华周刊")
+        self.assertEqual(found["QHZK"].sys_id, "24")
+
+    def test_cli_lists_and_saves(self):
+        registry = os.path.join(self.tmp.name, "collections.json")
+        code = main(["collections", "--base-url", self.base_url, "--delay", "0",
+                     "-q", "--registry", registry, "--save"])
+        self.assertEqual(code, 0)
+        loaded = collib.load_registry(registry)
+        self.assertEqual(set(loaded), {"XQH", "QHZK"})
+        # The built-in range for XQH must survive a save from the site.
+        self.assertEqual((loaded["XQH"].first, loaded["XQH"].last), (1, 1670))
+
+    def test_offline_listing_makes_no_requests(self):
+        Handler.hits = []
+        code = main(["collections", "--offline", "-q",
+                     "--registry", "/nonexistent.json"])
+        self.assertEqual(code, 0)
+        self.assertEqual(Handler.hits, [])
+
+
+class TestSecondCollection(ServerTestCase):
+    def run_cli(self, command, *args):
+        return main([command, "--base-url", self.base_url, "--delay", "0", *args])
+
+    def test_discover_and_download_a_different_journal(self):
+        ids_file = os.path.join(self.tmp.name, "qhzk.txt")
+        dest = os.path.join(self.tmp.name, "qhzk")
+
+        code = self.run_cli("discover", "-c", "QHZK", "-q", "--out", ids_file,
+                            "--max-level", "all", "--coverage-target", "0")
+        self.assertEqual(code, 0)
+        with open(ids_file, encoding="utf-8") as handle:
+            listed = list(idlib.iter_id_file(handle.read()))
+        self.assertEqual(listed, ["0007", "0008"])
+
+        code = self.run_cli("download", "-c", "QHZK", "-q",
+                            "--ids", ids_file, "--dest", dest)
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(f for f in os.listdir(dest) if f.endswith(".pdf")),
+                         ["0007.pdf", "0008.pdf"])
+        # It must have used /swfPath/qhzk/, not the XQH directory.
+        self.assertTrue(any("/swfPath/qhzk/" in h for h in Handler.hits))
+        self.assertFalse(any("/swfPath/xqh/" in h for h in Handler.hits))
+
+    def test_download_without_ids_needs_a_known_range(self):
+        code = self.run_cli("download", "-c", "QHZK", "-q",
+                            "--dest", os.path.join(self.tmp.name, "d"))
+        self.assertEqual(code, 1)
+
+    def test_explicit_range_works_for_an_unknown_journal(self):
+        dest = os.path.join(self.tmp.name, "qhzk")
+        code = self.run_cli("download", "-c", "QHZK", "-q", "--first", "7", "--last", "8",
+                            "--dest", dest)
+        self.assertEqual(code, 0)
+        self.assertEqual(sorted(f for f in os.listdir(dest) if f.endswith(".pdf")),
+                         ["0007.pdf", "0008.pdf"])
+
+    def test_collections_keep_separate_manifests(self):
+        root = os.path.join(self.tmp.name, "pdfs")
+        cwd = os.getcwd()
+        os.chdir(self.tmp.name)
+        self.addCleanup(os.chdir, cwd)
+
+        self.run_cli("download", "-c", "XQH", "-q", "--first", "1", "--last", "1")
+        self.run_cli("download", "-c", "QHZK", "-q", "--first", "7", "--last", "7")
+        self.assertTrue(os.path.exists(os.path.join("pdfs", "xqh", "0001.pdf")))
+        self.assertTrue(os.path.exists(os.path.join("pdfs", "qhzk", "0007.pdf")))
+        # Same id number in two journals must not collide.
+        xqh = Manifest.load(os.path.join("pdfs", "xqh", "manifest.json"))
+        qhzk = Manifest.load(os.path.join("pdfs", "qhzk", "manifest.json"))
+        self.assertIn("0001", xqh.entries)
+        self.assertNotIn("0001", qhzk.entries)
+
+
+class TestDetailPages(ServerTestCase):
+    def run_cli(self, command, *args):
+        return main([command, "--base-url", self.base_url, "--delay", "0", *args])
+
+    def test_index_with_only_detail_links_yields_nothing_by_default(self):
+        DETAIL_ONLY["value"] = True
+        catalog = discover.catalog_scan(
+            self.client(), XQH, coverage_target=0.0, max_level="all",
+            log=lambda m: None,
+        )
+        self.assertEqual(catalog.confirmed, set())
+        self.assertEqual(len(catalog.detail_links), len(INDEXED["XQH"]))
+
+    def test_following_detail_pages_recovers_the_ids(self):
+        DETAIL_ONLY["value"] = True
+        client = self.client()
+        catalog = discover.catalog_scan(
+            client, XQH, coverage_target=0.0, max_level="all", log=lambda m: None,
+        )
+        found = discover.follow_details(
+            client, XQH, sorted(catalog.detail_links), log=lambda m: None
+        )
+        self.assertEqual(found, set(INDEXED["XQH"]))
+        self.assertIn("1670Z22", found)
+
+    def test_cli_follow_details(self):
+        DETAIL_ONLY["value"] = True
+        ids_file = os.path.join(self.tmp.name, "ids.txt")
+        code = self.run_cli("discover", "-q", "--out", ids_file, "--only-discovered",
+                            "--max-level", "all", "--coverage-target", "0",
+                            "--follow-details")
+        self.assertEqual(code, 0)
+        with open(ids_file, encoding="utf-8") as handle:
+            self.assertEqual(list(idlib.iter_id_file(handle.read())),
+                             sorted(INDEXED["XQH"], key=idlib.sort_key))
+
+    def test_max_details_caps_the_second_pass(self):
+        DETAIL_ONLY["value"] = True
+        client = self.client()
+        catalog = discover.catalog_scan(
+            client, XQH, coverage_target=0.0, max_level="all", log=lambda m: None,
+        )
+        found = discover.follow_details(
+            client, XQH, sorted(catalog.detail_links)[:2], log=lambda m: None
+        )
+        self.assertEqual(len(found), 2)
 
 
 if __name__ == "__main__":

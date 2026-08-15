@@ -6,14 +6,10 @@ import os
 from typing import Callable, Iterable, List, Optional, Tuple
 
 from .client import BudgetExhausted, PoliteClient, Response, TransportError
+from .collections import Collection
 from .manifest import ERROR, MISSING, OK, Entry, Manifest
 
 PDF_MAGIC = b"%PDF-"
-PDF_DIR = "/swfPath/xqh"
-
-
-def pdf_path(issue_id: str) -> str:
-    return f"{PDF_DIR}/{issue_id}.pdf"
 
 
 def looks_like_pdf(head: bytes) -> bool:
@@ -32,14 +28,14 @@ def inspect_file(path: str) -> Tuple[bool, bool, int]:
     return looks_like_pdf(head), b"%%EOF" in tail, size
 
 
-def probe(client: PoliteClient, issue_id: str) -> Optional[bool]:
+def probe(client: PoliteClient, collection: Collection, issue_id: str) -> Optional[bool]:
     """Cheap existence check. True/False, or None if we could not tell.
 
     Tries HEAD first because it costs no body. Servers that reject HEAD get a
     tiny ranged GET instead -- we only need the first few bytes to know whether
     this is a real PDF or a "not found" page dressed up as HTTP 200.
     """
-    path = pdf_path(issue_id)
+    path = collection.pdf_path(issue_id)
     try:
         response = client.request("HEAD", path)
     except BudgetExhausted:
@@ -76,6 +72,7 @@ def probe(client: PoliteClient, issue_id: str) -> Optional[bool]:
 
 def download_one(
     client: PoliteClient,
+    collection: Collection,
     issue_id: str,
     dest_dir: str,
     *,
@@ -94,7 +91,9 @@ def download_one(
 
     try:
         with open(part_path, "wb") as sink:
-            response = client.request("GET", pdf_path(issue_id), sink=sink)
+            response = client.request(
+                "GET", collection.pdf_path(issue_id), sink=sink
+            )
     except BudgetExhausted:
         # The run is over, not this file. Leave no partial behind and let it
         # travel up so the caller stops rather than marking a false error.
@@ -160,6 +159,7 @@ def download_one(
 
 def download_all(
     client: PoliteClient,
+    collection: Collection,
     issue_ids: Iterable[str],
     dest_dir: str,
     manifest: Manifest,
@@ -187,7 +187,7 @@ def download_all(
 
     try:
         for index, issue_id in enumerate(pending, 1):
-            entry = download_one(client, issue_id, dest_dir, log=log)
+            entry = download_one(client, collection, issue_id, dest_dir, log=log)
             manifest.record(entry)
             if entry.status == OK:
                 stats["downloaded"] += 1

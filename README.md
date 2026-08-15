@@ -1,58 +1,85 @@
 # SociCS
 
-A polite archiver for the 新清华 (XQH) issue PDFs on the Tsinghua journal server:
+A polite archiver for the Tsinghua journal platform (`thujournal.lib.tsinghua.edu.cn`),
+which hosts several of the university's historical publications:
 
 ```
+/QHHome/SecondIndex?sysId=23&displayDBCode=XQH&displayDBName=新清华&displayyear=2006
+                                          ^^^ selects the journal
+
 https://thujournal.lib.tsinghua.edu.cn/swfPath/xqh/0001.pdf
+                                               ^^^ same code, lowercased
                                               ... 1670.pdf
                                               ... 1670Z22.pdf   <- supplements
 ```
 
-It downloads the base range `0001`–`1670`, finds supplementary issues without
+It downloads any collection on the platform, finds supplementary issues without
 guessing at them, and is built to take a long time on purpose.
 
 Python 3.8+. No dependencies — standard library only.
 
+> The package is still called `thu_xqh` from when it only handled 新清华. The
+> name is a leftover; it drives every collection now.
+
 ## Quick start
 
 ```bash
-# 1. Ask the site which issues exist (a few dozen requests)
-python -m thu_xqh discover --out issue-ids.txt
+# 1. See which journals the platform offers
+python3 -m thu_xqh collections --save
 
-# 2. Fetch them (slow by design — see "Load on the server")
-python -m thu_xqh download --ids issue-ids.txt --dest pdfs
+# 2. Ask one of them which issues exist
+python3 -m thu_xqh discover -c XQH --out ids-xqh.txt
 
-# 3. Check what landed
-python -m thu_xqh verify --dest pdfs
-python -m thu_xqh status --dest pdfs
+# 3. Fetch them
+python3 -m thu_xqh download -c XQH --ids ids-xqh.txt
+
+# 4. Check what landed
+python3 -m thu_xqh verify -c XQH
+python3 -m thu_xqh status -c XQH
 ```
 
-Stop it at any point with Ctrl-C and rerun the same command — it picks up where
-it left off. Nothing is ever fetched twice.
+Files land in `pdfs/<collection>/` by default, each with its own manifest, so
+two journals that both number an issue `0001` never collide.
+
+Stop at any point with Ctrl-C and rerun the same command — it resumes. Nothing
+is ever fetched twice.
+
+## Collections
+
+`-c/--collection` takes the `displayDBCode` from the browse URL. `XQH` (新清华,
+issues `0001`–`1670`, 1953–2006) is the only one whose settings ship built in,
+because it is the only one whose URLs have been confirmed.
+
+```bash
+python3 -m thu_xqh collections            # ask the site, print what it finds
+python3 -m thu_xqh collections --save     # ...and cache it in collections.json
+python3 -m thu_xqh collections --offline  # just show the cache
+```
+
+An unknown code still works — defaults are derived from it (`QHZK` →
+`/swfPath/qhzk/`), and anything wrong can be overridden:
+
+```bash
+python3 -m thu_xqh discover -c QHZK --db-name 清华周刊 --sys-id 24 \
+    --pdf-dir /swfPath/qhzk --id-width 4 --first 1 --last 900 \
+    --first-year 1914 --last-year 1937
+```
+
+For a collection with no known issue range, `discover` writes only what the
+site confirmed, and `download` requires either `--ids` or an explicit
+`--first`/`--last`.
 
 ## Finding the supplements
 
 This is the part worth explaining, because the obvious approach is bad.
 
-The obvious approach is to guess: take each of the 1670 base numbers, append
-every plausible marker (`Z1`, `Z2`, … `Z30`), and see what comes back. That is
+The obvious approach is to guess: take each base number, append every plausible
+marker (`Z1`, `Z2`, … `Z30`), and see what comes back. For XQH alone that is
 **~100,000 requests** to a small university library server to find perhaps a
-few dozen files — and it still only finds markers you thought to guess. If
-supplements use `S1` or `ZK` or a marker no one predicted, they stay invisible.
+few dozen files — and it still only finds markers you thought to guess.
 
-So the tool asks the site instead. The archive publishes a browse index:
-
-```
-/QHHome/SecondIndex?sysId=23&displayDBCode=XQH&displayDBName=新清华
-                   &displayyear=1955&displaymonth=11
-```
-
-`displayDBCode=XQH` is the same collection as the `swfPath/xqh/` PDF directory,
-and `displayyear` accepts `全部` ("all"). Walking that index lists every issue
-the archive knows about — supplements included, whatever they are named — in a
-few dozen requests.
-
-The walk **escalates only as far as it needs to**:
+So the tool reads the site's own browse index instead. The walk **escalates
+only as far as it needs to**:
 
 | Level | Views fetched | When it is used |
 |---|---|---|
@@ -61,69 +88,83 @@ The walk **escalates only as far as it needs to**:
 | `year` | 54 | if `month` didn't |
 | `year-month` | 648 | last resort |
 
-After each level it measures coverage — how much of the expected `0001`–`1670`
-range it accounted for — and stops as soon as it clears `--coverage-target`
-(default 98%). Pagination links within each view are followed automatically.
+After each level it measures coverage against the collection's expected range
+and stops as soon as it clears `--coverage-target` (default 98%). Pagination
+links within each view are followed automatically.
+
+### Two routes to a PDF id
+
+Index rows may link straight to a PDF, or only to a detail page:
+
+```
+/DetaliSwfInfo?dbName=XQH&sysID=135717
+```
+
+Note that `sysID` there is *not* the PDF number — the mapping lives in the
+detail page's own markup. So discovery works in two passes:
+
+1. **Cheap pass** — scrape PDF hrefs directly off the index. Free, if present.
+2. **`--follow-details`** — open each linked detail page and read the PDF link
+   out of it. One request per issue, so it is opt-in, and it is the reliable
+   route when the index only links to detail pages.
+
+If the cheap pass finds nothing but detail links exist, `discover` says so and
+tells you what the second pass would cost.
 
 ### Confirmed vs. candidate ids
 
 Discovery distinguishes two kinds of finding, because conflating them produces
 confident nonsense:
 
-- **Confirmed** — read straight out of a `swfPath/xqh/….pdf` link. A fact.
-- **Candidate** — an id-shaped token found in some other link (`?id=1670Z22`).
-  A lead, not a fact.
+- **Confirmed** — read straight out of a `swfPath/<code>/….pdf` link. A fact.
+- **Candidate** — an id-shaped token in some other link. A lead, not a fact.
 
-Candidates are reported separately and are only added to the list if you pass
-`--confirm-candidates`, which existence-checks each one. Bare four-digit numbers
-in page *text* are ignored entirely — on a real page those are years and row
-counts far more often than issue numbers.
+Candidates are reported separately and only added if you pass
+`--confirm-candidates`, which existence-checks each one. Bare four-digit
+numbers in page *text* are ignored entirely — on a real page those are years
+and row counts far more often than issue numbers.
 
 ### If the catalog isn't enough
 
-Guessing is still available as a fallback, but it is opt-in and always costed
-out before it runs:
+Guessing is still available, but opt-in and always costed out first:
 
 ```bash
-# Try Z1..Z30 against three specific issues
-python -m thu_xqh discover --probe-bases 0900,1200,1670 --probe-suffixes 'Z{1..30}'
-
-# See the price of a full sweep without paying it
-python -m thu_xqh discover --probe-bases all --dry-run
-#   Probe sweep: 1670 base(s) x 30 suffix(es)
-#   up to 100200 requests, roughly 8350 minute(s) at 5.0s spacing.
+python3 -m thu_xqh discover -c XQH --probe-bases 0900,1200,1670 \
+    --probe-suffixes 'Z{1..30}' --dry-run
 ```
 
-`--stop-after-misses N` abandons a base after N consecutive empty suffixes,
-which cuts the cost sharply when most bases have no supplements. Probing never
-runs without either an interactive confirmation or `--yes`.
+`--stop-after-misses N` abandons a base after N consecutive empty suffixes.
+Probing never runs without an interactive confirmation or `--yes`.
 
 ## Load on the server
 
 The traffic profile is the main design constraint:
 
 - **One connection, reused.** No parallelism at all — there is no concurrency
-  flag to turn on. ~1700 files over one keep-alive connection means ~1700 fewer
-  TCP and TLS handshakes than a naive fetcher.
+  flag to turn on.
 - **One request at a time**, spaced `--delay` seconds apart (default 5.0) with
   ±25% jitter so the pattern isn't a metronome.
 - **It only ever slows down.** A 429 or 503 doubles the base delay for the rest
   of the run and honours `Retry-After`. The delay never goes back down.
 - **Nothing is fetched twice.** The manifest records every outcome, including
   "this issue does not exist", so a rerun costs zero requests for settled ids.
-- **`robots.txt` is checked** before anything else and respected. `--ignore-robots`
-  exists but should only be used with the site operator's permission.
+- **`robots.txt` is checked** before anything else and respected.
 - **`--max-requests N`** caps a session so the work can be spread over days.
 
-A full base-range run is ~1670 requests, about **two and a half hours of pure
-spacing** at the default 5s delay, plus transfer time. That is the intended
-cost. If you are in a hurry, be in a hurry somewhere else.
+A full XQH run is ~1670 requests, about **two and a half hours of pure spacing**
+at the default 5s delay, plus transfer time. Adding `--follow-details` roughly
+doubles that. Several collections back to back is a multi-day job — which is
+the intended shape. Check the cost before starting:
+
+```bash
+python3 -m thu_xqh download -c XQH --ids ids-xqh.txt --dry-run
+```
 
 ## What counts as a successful download
 
 A `200 OK` is not enough. Servers like this one commonly answer a missing file
 with a friendly HTML page and a `200` status, and a naive downloader happily
-saves 1670 copies of an error page.
+saves thousands of copies of an error page.
 
 So every response is checked for the `%PDF-` magic bytes, and against
 `Content-Length` where present. Bytes are written to a `.part` file and only
@@ -141,60 +182,60 @@ All options can be written after the subcommand.
 
 | Command | What it does |
 |---|---|
-| `discover` | Walks the catalog, writes an id list |
+| `collections` | Lists the journals the platform offers |
+| `discover` | Walks a collection's catalog, writes an id list |
 | `download` | Fetches PDFs from an id list |
 | `verify` | Re-checks downloaded files, writes `retry-ids.txt` |
 | `status` | Summarises manifest progress |
 
-Common options: `--delay`, `--dest`, `--manifest`, `--max-requests`,
-`--first`/`--last`, `--base-url`, `--user-agent`, `--ignore-robots`, `-q`.
+Common: `--delay`, `--dest`, `--manifest`, `--max-requests`, `--base-url`,
+`--user-agent`, `--ignore-robots`, `-q`.
+
+Collection picker (on `discover`, `download`, `verify`, `status`):
+`-c/--collection`, `--registry`, `--sys-id`, `--db-name`, `--pdf-dir`,
+`--id-width`, `--first`, `--last`, `--first-year`, `--last-year`.
 
 `discover`: `--out`, `--max-level`, `--coverage-target`, `--only-discovered`,
-`--confirm-candidates`, `--probe-bases`, `--probe-suffixes`,
-`--stop-after-misses`, `--save-html`, `--dry-run`, `--yes`.
+`--follow-details`, `--max-details`, `--confirm-candidates`, `--probe-bases`,
+`--probe-suffixes`, `--stop-after-misses`, `--save-html`, `--dry-run`, `--yes`.
 
 `download`: `--ids`, `--limit`, `--force`, `--recheck-missing`, `--dry-run`.
 
-By default `discover` writes the full `0001`–`1670` range plus any supplements
-it found, on the assumption that the catalog may be incomplete — an id that
-turns out not to exist costs one request and is then remembered as absent. Pass
-`--only-discovered` to trust the catalog and write only what it confirmed.
-
 ## Verification status
 
-The test suite (`python -m unittest discover -s tests`, 35 tests) runs against a
-local stand-in server that reproduces paginated index pages, real PDFs, plain
-404s, HTML-error-pages-with-status-200, `HEAD`-rejecting servers, truncated
-PDFs, and resume behaviour.
+The test suite (`python3 -m unittest discover -s tests`, 52 tests) runs against
+a local stand-in server covering two collections, paginated index pages,
+detail-page-only indexes, real PDFs, plain 404s, HTML-error-pages-with-status-200,
+`HEAD`-rejecting servers, truncated PDFs, per-collection manifest isolation,
+request budgets, and resume behaviour.
 
 **The code has not been run against the live site.** The network policy of the
 environment it was written in blocks `thujournal.lib.tsinghua.edu.cn` outright,
-so the index URL shape, its pagination markup, and the supplement naming beyond
-the one known example (`1670Z22`) are all inferred from the site's public URLs
-rather than observed. The parsers are written defensively for that reason, but
-the first live run deserves a look:
+so the page markup, the collection list, and supplement naming beyond the one
+known example (`1670Z22`) are inferred from the site's public URLs rather than
+observed. The parsers are written defensively for that reason, but the first
+live run deserves a look:
 
 ```bash
-# Cheapest possible check: one index page, saved for inspection
-python -m thu_xqh discover --max-level all --coverage-target 0 \
+python3 -m thu_xqh discover -c XQH --max-level all --coverage-target 0 \
     --save-html debug/ --out /tmp/ids.txt
 ```
 
-If that reports `0 confirmed`, the index markup differs from what is assumed —
-the saved HTML in `debug/` will show what the parser actually received, and the
-patterns to adjust are `PDF_HREF_RE`, `LINKY_ATTR_RE`, and `INDEX_PATH` at the
-top of `thu_xqh/discover.py`.
+If that reports `0 confirmed`, the saved HTML in `debug/` shows what the parser
+actually received. The patterns to adjust are `pdf_href_re`, `LINKY_ATTR_RE`
+and `DETAIL_RE`, in `thu_xqh/discover.py` and `thu_xqh/collections.py`.
 
 ## Layout
 
 ```
 thu_xqh/
-  client.py     one connection, paced requests, backoff, robots
-  ids.py        issue id shapes and parsing
-  discover.py   catalog walk, and the probing fallback
-  download.py   fetching, PDF validation, verification
-  manifest.py   resumable run state
-  cli.py        command line
+  client.py       one connection, paced requests, backoff, robots
+  collections.py  which journals exist, and their URL settings
+  ids.py          issue id shapes and parsing
+  discover.py     catalog walk, detail pages, probing fallback
+  download.py     fetching, PDF validation, verification
+  manifest.py     resumable run state
+  cli.py          command line
 tests/
   test_thu_xqh.py
 ```

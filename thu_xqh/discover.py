@@ -1,22 +1,22 @@
 """Finding out which issues exist -- especially the supplements.
 
 The naive way to find supplements like ``1670Z22`` is to guess: append every
-plausible marker to every one of the 1670 base numbers and see what sticks.
-That is tens of thousands of requests to a small library server for a handful
-of hits, and it still only finds the markers you thought to guess.
+plausible marker to every one of the base numbers and see what sticks. That is
+tens of thousands of requests to a small library server for a handful of hits,
+and it still only finds the markers you thought to guess.
 
-So we ask the site instead. The archive publishes a browse index:
+So we ask the site instead. Each collection publishes a browse index:
 
     /QHHome/SecondIndex?sysId=23&displayDBCode=XQH&displayDBName=新清华
                        &displayyear=1955&displaymonth=11
 
-``displayDBCode=XQH`` is the same collection as the ``swfPath/xqh/`` PDF
-directory, and ``displayyear`` accepts 全部 ("all"). Walking that index lists
-every issue the archive knows about, supplements included, in a few dozen
-requests -- and it finds markers we would never have guessed.
+``displayDBCode`` selects the publication and matches the PDF directory
+(``XQH`` -> ``swfPath/xqh/``), and ``displayyear`` accepts 全部 ("all").
 
-Probing is kept as a fallback for when the catalog is unreachable or looks
-incomplete. It is opt-in, scoped, and always costed out before it runs.
+Index rows may link straight to a PDF, or only to a detail page
+(``/DetaliSwfInfo?dbName=XQH&sysID=135717``) whose own markup carries the PDF
+link. Both routes are supported: the cheap one is tried first, and following
+detail pages is opt-in because it costs one request per issue.
 """
 
 from __future__ import annotations
@@ -25,22 +25,17 @@ import os
 import re
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from . import ids as idlib
+from .collections import DETAIL_RE, INDEX_PATH, Collection
 from .client import PoliteClient, TransportError
 from .download import probe
 
 ALL = "全部"
-INDEX_PATH = "/QHHome/SecondIndex"
-DEFAULT_SYS_ID = "23"
-DEFAULT_DB_CODE = "XQH"
-DEFAULT_DB_NAME = "新清华"
 DEFAULT_FIRST_YEAR = 1953
 DEFAULT_LAST_YEAR = 2006
 
-# Ids taken straight out of a PDF href -- these are facts, not inferences.
-PDF_HREF_RE = re.compile(r"/swfPath/xqh/([0-9A-Za-z]{4,12})\.pdf", re.IGNORECASE)
 HREF_RE = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 PAGE_PARAM_RE = re.compile(r"(?:page|pageIndex|pageNo|pageNum|curPage)=(\d+)", re.IGNORECASE)
 
@@ -54,15 +49,25 @@ LINKY_ATTR_RE = re.compile(
 )
 
 
+def pdf_href_re(collection: Collection) -> "re.Pattern[str]":
+    """Match PDF links belonging to this collection's directory."""
+    return re.compile(
+        re.escape(collection.pdf_dir) + r"/([0-9A-Za-z]{1,16})\.pdf", re.IGNORECASE
+    )
+
+
 @dataclass
 class Catalog:
     """What a catalog walk turned up."""
 
     confirmed: Set[str] = field(default_factory=set)
-    """Ids read from an actual ``swfPath/xqh/....pdf`` link."""
+    """Ids read from an actual ``….pdf`` link."""
 
     candidates: Set[str] = field(default_factory=set)
     """Id-shaped tokens found elsewhere on the page. Plausible, not proven."""
+
+    detail_links: Set[str] = field(default_factory=set)
+    """Detail-page paths seen, for the optional second pass."""
 
     pages_fetched: int = 0
     level: str = ""
@@ -73,36 +78,62 @@ class Catalog:
     def all_ids(self) -> Set[str]:
         return self.confirmed | self.candidates
 
-    def coverage(self, first: int, last: int) -> float:
-        """Fraction of the expected base-issue range this walk accounted for."""
+    def coverage(self, first: Optional[int], last: Optional[int]) -> float:
+        """Fraction of the expected issue range this walk accounted for.
+
+        Meaningless without a known range, so an unknown range reports full
+        coverage rather than driving a pointless escalation to 648 requests.
+        """
+        if first is None or last is None:
+            return 1.0
         expected = last - first + 1
         if expected <= 0:
             return 0.0
-        seen = {idlib.split_id(i)[0] for i in self.all_ids}
+        seen = {idlib.split_id(i)[0] for i in self.all_ids if _numeric(i)}
         return len({b for b in seen if first <= b <= last}) / expected
 
     def supplements(self) -> List[str]:
         """Supplements we actually saw a PDF link for."""
-        return idlib.sorted_ids(i for i in self.confirmed if idlib.is_supplement(i))
+        return idlib.sorted_ids(i for i in self.confirmed if _is_supplement(i))
 
     def candidate_supplements(self) -> List[str]:
         """Supplement-shaped ids that still need confirming."""
-        return idlib.sorted_ids(i for i in self.candidates if idlib.is_supplement(i))
+        return idlib.sorted_ids(i for i in self.candidates if _is_supplement(i))
+
+    def merge(self, other: "Catalog") -> None:
+        self.confirmed |= other.confirmed
+        self.candidates |= other.candidates
+        self.detail_links |= other.detail_links
+        self.pages_fetched += other.pages_fetched
+        self.errors.extend(other.errors)
+
+
+def _numeric(issue_id: str) -> bool:
+    try:
+        idlib.split_id(issue_id)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_supplement(issue_id: str) -> bool:
+    try:
+        return idlib.is_supplement(issue_id)
+    except ValueError:
+        return False
 
 
 def index_url(
+    collection: Collection,
     year: str,
     month: str,
     *,
-    sys_id: str = DEFAULT_SYS_ID,
-    db_code: str = DEFAULT_DB_CODE,
-    db_name: str = DEFAULT_DB_NAME,
     extra: Optional[Dict[str, str]] = None,
 ) -> str:
     params = {
-        "sysId": sys_id,
-        "displayDBCode": db_code,
-        "displayDBName": db_name,
+        "sysId": collection.sys_id,
+        "displayDBCode": collection.code,
+        "displayDBName": collection.name or collection.code,
         "displayyear": year,
         "displaymonth": month,
     }
@@ -111,32 +142,43 @@ def index_url(
     return f"{INDEX_PATH}?{urllib.parse.urlencode(params)}"
 
 
-def extract_ids(html: str, first: int, last: int) -> Tuple[Set[str], Set[str]]:
+def extract_ids(html: str, collection: Collection) -> Tuple[Set[str], Set[str]]:
     """Pull issue ids out of an index page.
 
-    Returns ``(confirmed, candidates)``. Anything sitting in a PDF href is
-    confirmed. Candidates come only from link-carrying attributes -- a detail
-    page URL like ``?id=1670Z22`` is a real lead, whereas a bare four-digit
-    number in the page text is as likely to be a year or a row count.
+    Returns ``(confirmed, candidates)``. Anything sitting in a PDF href for
+    this collection is confirmed. Candidates come only from link-carrying
+    attributes -- a detail page URL like ``?id=1670Z22`` is a real lead,
+    whereas a bare four-digit number in the page text is as likely to be a year
+    or a row count.
     """
     confirmed: Set[str] = set()
-    for raw in PDF_HREF_RE.findall(html):
-        normalized = idlib.normalize(raw)
-        if normalized and idlib.in_range(normalized, first, last):
+    for raw in pdf_href_re(collection).findall(html):
+        normalized = idlib.normalize_href_id(raw)
+        if normalized:
             confirmed.add(normalized)
 
     candidates: Set[str] = set()
     for value in LINKY_ATTR_RE.findall(html):
-        if "/swfPath/" in value:
+        if collection.pdf_dir.lower() in value.lower():
             continue  # already handled, and its ids are confirmed
         for raw in idlib.ID_IN_TEXT_RE.findall(value):
-            normalized = idlib.normalize(raw)
+            normalized = idlib.normalize(raw, collection.id_width)
             if not normalized or normalized in confirmed:
                 continue
-            if not idlib.in_range(normalized, first, last):
+            if not idlib.in_range(normalized, collection.first, collection.last):
                 continue
             candidates.add(normalized)
     return confirmed, candidates
+
+
+def extract_detail_links(html: str, base_path: str) -> Set[str]:
+    """Detail-page paths (``/DetaliSwfInfo?dbName=…&sysID=…``) on a page."""
+    links: Set[str] = set()
+    for match in DETAIL_RE.findall(html):
+        target = urllib.parse.urljoin(base_path, match.replace("&amp;", "&"))
+        parts = urllib.parse.urlsplit(target)
+        links.add(parts.path + (f"?{parts.query}" if parts.query else ""))
+    return links
 
 
 def _pagination_paths(html: str, current_path: str) -> List[str]:
@@ -162,19 +204,17 @@ def _pagination_paths(html: str, current_path: str) -> List[str]:
 
 def scan_index(
     client: PoliteClient,
+    collection: Collection,
     year: str,
     month: str,
     *,
-    first: int,
-    last: int,
     max_pages: int = 40,
     log: Callable[[str], None] = lambda msg: None,
     save_html: Optional[str] = None,
-    **url_kwargs,
 ) -> Catalog:
     """Fetch one index view, following its pagination links."""
     result = Catalog()
-    queue = [index_url(year, month, **url_kwargs)]
+    queue = [index_url(collection, year, month)]
     visited: Set[str] = set()
 
     while queue and result.pages_fetched < max_pages:
@@ -194,10 +234,11 @@ def scan_index(
         html = response.text()
         if save_html:
             _dump(save_html, path, html)
-        confirmed, candidates = extract_ids(html, first, last)
+        confirmed, candidates = extract_ids(html, collection)
         before = len(result.all_ids)
         result.confirmed |= confirmed
         result.candidates |= candidates
+        result.detail_links |= extract_detail_links(html, path)
         gained = len(result.all_ids) - before
         for next_path in _pagination_paths(html, path):
             if next_path not in visited:
@@ -213,16 +254,12 @@ def scan_index(
 
 def catalog_scan(
     client: PoliteClient,
+    collection: Collection,
     *,
-    first: int = idlib.DEFAULT_FIRST,
-    last: int = idlib.DEFAULT_LAST,
-    first_year: int = DEFAULT_FIRST_YEAR,
-    last_year: int = DEFAULT_LAST_YEAR,
     coverage_target: float = 0.98,
     max_level: str = "year-month",
     log: Callable[[str], None] = print,
     save_html: Optional[str] = None,
-    **url_kwargs,
 ) -> Catalog:
     """Walk the browse index, widening only as far as needed.
 
@@ -240,26 +277,22 @@ def catalog_scan(
     tried: List[str] = []
     for level in allowed:
         tried.append(level)
-        views = _views_for_level(level, first_year, last_year)
+        views = _views_for_level(level, collection.first_year, collection.last_year)
         log(f"  catalog level '{level}': {len(views)} index view(s)")
         merged = Catalog(level=level)
         for year, month in views:
-            partial = scan_index(
-                client, year, month, first=first, last=last, log=log,
-                save_html=save_html, **url_kwargs
+            merged.merge(
+                scan_index(client, collection, year, month, log=log, save_html=save_html)
             )
-            merged.confirmed |= partial.confirmed
-            merged.candidates |= partial.candidates
-            merged.pages_fetched += partial.pages_fetched
-            merged.errors.extend(partial.errors)
         merged.candidates -= merged.confirmed
 
-        coverage = merged.coverage(first, last)
+        coverage = merged.coverage(collection.first, collection.last)
         log(f"  -> {len(merged.confirmed)} confirmed, {len(merged.candidates)} candidate, "
-            f"{len(merged.supplements())} supplement(s), coverage {coverage:.1%}")
+            f"{len(merged.supplements())} supplement(s), {len(merged.detail_links)} "
+            f"detail link(s), coverage {coverage:.1%}")
         if len(merged.all_ids) > len(best.all_ids):
             best = merged
-        if coverage >= coverage_target:
+        if coverage >= coverage_target and merged.all_ids:
             merged.levels_tried = tried
             return merged
     best.levels_tried = tried
@@ -278,11 +311,46 @@ def _views_for_level(level: str, first_year: int, last_year: int) -> List[Tuple[
     return [(y, m) for y in years for m in months]
 
 
+def follow_details(
+    client: PoliteClient,
+    collection: Collection,
+    detail_paths: Sequence[str],
+    *,
+    log: Callable[[str], None] = print,
+    save_html: Optional[str] = None,
+) -> Set[str]:
+    """Open each detail page and read the PDF id out of it.
+
+    One request per issue, which is why this is opt-in. It is the reliable
+    route when index rows link only to detail pages.
+    """
+    found: Set[str] = set()
+    pattern = pdf_href_re(collection)
+    for index, path in enumerate(detail_paths, 1):
+        try:
+            response = client.request("GET", path)
+        except TransportError as exc:
+            log(f"  ! {path}: {exc}")
+            continue
+        if not response.ok:
+            log(f"  ! {path}: HTTP {response.status}")
+            continue
+        html = response.text()
+        if save_html:
+            _dump(save_html, path, html)
+        hits = {idlib.normalize_href_id(r) for r in pattern.findall(html)}
+        hits.discard(None)
+        found |= hits
+        log(f"  [{index}/{len(detail_paths)}] {path[:72]} -> {sorted(hits) or 'nothing'}")
+    return found
+
+
 # -- fallback: guessing ------------------------------------------------------
 
 
 def probe_ids(
     client: PoliteClient,
+    collection: Collection,
     issue_ids: Sequence[str],
     *,
     log: Callable[[str], None] = print,
@@ -291,7 +359,7 @@ def probe_ids(
     found: List[str] = []
     unknown: List[str] = []
     for index, issue_id in enumerate(issue_ids, 1):
-        verdict = probe(client, issue_id)
+        verdict = probe(client, collection, issue_id)
         if verdict is True:
             found.append(issue_id)
             log(f"  [{index}/{len(issue_ids)}] {issue_id}  found")
@@ -303,6 +371,7 @@ def probe_ids(
 
 def probe_supplements(
     client: PoliteClient,
+    collection: Collection,
     bases: Sequence[str],
     suffixes: Sequence[str],
     *,
@@ -319,11 +388,11 @@ def probe_supplements(
     for base in bases:
         misses = 0
         for suffix in suffixes:
-            candidate = idlib.normalize(f"{base}{suffix}")
+            candidate = idlib.normalize_href_id(f"{base}{suffix}")
             if candidate is None:
                 log(f"  ! skipping malformed candidate {base}{suffix}")
                 continue
-            verdict = probe(client, candidate)
+            verdict = probe(client, collection, candidate)
             if verdict is True:
                 found.append(candidate)
                 misses = 0
@@ -336,7 +405,7 @@ def probe_supplements(
 
 
 def _dump(directory: str, path: str, html: str) -> None:
-    """Save a fetched index page so its markup can be inspected offline."""
+    """Save a fetched page so its markup can be inspected offline."""
     os.makedirs(directory, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9]+", "_", path).strip("_")[:120] or "index"
     with open(os.path.join(directory, safe + ".html"), "w", encoding="utf-8") as handle:
