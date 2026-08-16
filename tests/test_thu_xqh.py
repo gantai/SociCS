@@ -486,6 +486,37 @@ class TestCli(ServerTestCase):
         with open(os.path.join(dest, "retry-ids.txt"), encoding="utf-8") as handle:
             self.assertEqual(list(idlib.iter_id_file(handle.read())), ["0001"])
 
+    def test_limit_is_not_reported_as_already_settled(self):
+        """A deferred file is not a downloaded one."""
+        import io, contextlib
+        dest = os.path.join(self.tmp.name, "pdfs")
+        subset = os.path.join(self.tmp.name, "subset.txt")
+        with open(subset, "w", encoding="utf-8") as handle:
+            handle.write("0001\n0004\n1670\n")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            main(["download", "--base-url", self.base_url, "--delay", "0",
+                  "--ids", subset, "--dest", dest, "--limit", "1", "--dry-run"])
+        out = buffer.getvalue()
+        self.assertIn("1 to fetch", out)
+        self.assertNotIn("already settled", out)
+        self.assertIn("2 held back by --limit", out)
+
+    def test_settled_and_deferred_are_counted_separately(self):
+        import io, contextlib
+        dest = os.path.join(self.tmp.name, "pdfs")
+        subset = os.path.join(self.tmp.name, "subset.txt")
+        with open(subset, "w", encoding="utf-8") as handle:
+            handle.write("0001\n0004\n1670\n")
+        self.run_cli("download", "-q", "--ids", subset, "--dest", dest, "--limit", "1")
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            main(["download", "--base-url", self.base_url, "--delay", "0",
+                  "--ids", subset, "--dest", dest, "--limit", "1", "--dry-run"])
+        out = buffer.getvalue()
+        self.assertIn("1 already settled", out)
+        self.assertIn("1 held back by --limit", out)
+
     def test_limit_caps_the_run(self):
         dest = os.path.join(self.tmp.name, "pdfs")
         subset = os.path.join(self.tmp.name, "subset.txt")

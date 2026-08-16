@@ -500,14 +500,22 @@ def cmd_download(
 
     manifest = Manifest.load(manifest_path)
     if args.force:
-        pending = list(issue_ids)
+        outstanding = list(issue_ids)
     else:
-        pending = [i for i in issue_ids if not manifest.is_done(i, args.recheck_missing)]
-    if args.limit is not None:
-        pending = pending[: args.limit]
+        outstanding = [i for i in issue_ids if not manifest.is_done(i, args.recheck_missing)]
+    # Settled and deferred are different things: one is work already done, the
+    # other is work this run is choosing not to start yet. Reporting a --limit
+    # as "already settled" would claim files exist that do not.
+    settled = len(issue_ids) - len(outstanding)
+    pending = outstanding[: args.limit] if args.limit is not None else outstanding
+    deferred = len(outstanding) - len(pending)
 
-    log(f"{len(issue_ids)} id(s) requested, {len(pending)} to fetch, "
-        f"{len(issue_ids) - len(pending)} already settled.")
+    parts = [f"{len(issue_ids)} id(s) requested", f"{len(pending)} to fetch"]
+    if settled:
+        parts.append(f"{settled} already settled")
+    if deferred:
+        parts.append(f"{deferred} held back by --limit")
+    log(", ".join(parts) + ".")
     log(f"Destination: {dest}")
     log(f"Pacing: one connection, ~{args.delay}s between requests "
         f"(~{len(pending) * args.delay / 3600:.1f}h of spacing for this run).")
