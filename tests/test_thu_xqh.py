@@ -929,5 +929,127 @@ class TestDestinationLayout(ServerTestCase):
             self.assertEqual(list(idlib.iter_id_file(handle.read())), ["0007", "0008"])
 
 
+class TestAbsentReport(ServerTestCase):
+    """Absent, errored and never-attempted are three different things."""
+
+    def run_cli(self, command, *args):
+        return main([command, "--base-url", self.base_url, "--delay", "0", *args])
+
+    def _prepared(self):
+        """Download 0001-0004 of XQH: present, 404, 200-but-HTML, present.
+
+        The range is narrowed to 1-4 so that "not attempted" is genuinely
+        empty; against the real 1670-issue range, everything unrequested would
+        correctly show up there and swamp the assertions.
+        """
+        dest = os.path.join(self.tmp.name, "xqh")
+        subset = os.path.join(self.tmp.name, "subset.txt")
+        with open(subset, "w", encoding="utf-8") as handle:
+            handle.write("0001\n0002\n0003\n0004\n1670Z22\n")
+        self.run_cli("download", "-q", "--ids", subset, "--dest", dest)
+        return dest
+
+    def _report(self, dest, *args):
+        self.run_cli("absent", "-q", "--dest", dest, "--first", "1", "--last", "4", *args)
+        with open(os.path.join(dest, "absent-xqh.txt"), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_report_lists_the_absent_ids(self):
+        dest = self._prepared()
+        text = self._report(dest)
+        self.assertTrue(os.path.exists(os.path.join(dest, "absent-xqh.txt")))
+        # 0002 was a 404, 0003 was HTTP 200 with an HTML body.
+        self.assertIn("0002", text)
+        self.assertIn("0003", text)
+        self.assertIn("not found", text)
+        self.assertIn("response was not a PDF", text)
+        # Downloaded ones must not be listed as absent.
+        absent_block = text.split("--- ABSENT")[1].split("--- ERRORS")[0]
+        self.assertNotIn("0001", absent_block)
+        self.assertNotIn("1670Z22", absent_block)
+
+    def test_report_is_a_usable_id_list(self):
+        """Everything after '#' is a comment, so the file feeds back to --ids."""
+        dest = self._prepared()
+        text = self._report(dest)
+        self.assertEqual(list(idlib.iter_id_file(text)), ["0002", "0003"])
+
+    def test_report_includes_a_checkable_url(self):
+        dest = self._prepared()
+        text = self._report(dest)
+        self.assertIn(f"{self.base_url}/swfPath/xqh/0002.pdf", text)
+
+    def test_unrequested_issues_show_as_not_attempted(self):
+        """Downloading a subset must not make the rest look absent."""
+        dest = self._prepared()
+        self.run_cli("absent", "-q", "--dest", dest)  # full 1670 range
+        with open(os.path.join(dest, "absent-xqh.txt"), encoding="utf-8") as handle:
+            text = handle.read()
+        absent_block = text.split("--- ABSENT")[1].split("--- ERRORS")[0]
+        unattempted = text.split("--- NOT ATTEMPTED")[1]
+        self.assertIn("0002", absent_block)
+        self.assertNotIn("0500", absent_block)   # never asked for
+        self.assertIn("0500", unattempted)
+        self.assertIn("0005-1670", unattempted)  # compressed
+
+    def test_not_attempted_is_separate_from_absent(self):
+        """An interrupted run leaves gaps that are not absences."""
+        dest = os.path.join(self.tmp.name, "qhzk")
+        # QHZK holds 0007 and 0008; fetch only one of them.
+        self.run_cli("download", "-c", "QHZK", "-q", "--dest", dest,
+                     "--first", "7", "--last", "8", "--limit", "1")
+        self.run_cli("absent", "-c", "QHZK", "-q", "--dest", dest,
+                     "--first", "7", "--last", "8")
+        with open(os.path.join(dest, "absent-qhzk.txt"), encoding="utf-8") as handle:
+            text = handle.read()
+        absent_block = text.split("--- ABSENT")[1].split("--- ERRORS")[0]
+        unattempted = text.split("--- NOT ATTEMPTED")[1]
+        self.assertIn("(none)", absent_block)     # nothing was refused
+        self.assertIn("0008", unattempted)        # it was simply never asked for
+        self.assertIn("# not attempted       1", text)
+
+    def test_no_manifest_is_reported_not_crashed(self):
+        code = self.run_cli("absent", "-q", "--dest",
+                            os.path.join(self.tmp.name, "empty"))
+        self.assertEqual(code, 1)
+
+    def test_all_writes_one_report_per_collection(self):
+        small = {
+            "XQH": Collection(code="XQH", name="新清华", sys_id="23", first=1, last=2),
+            "QHZK": Collection(code="QHZK", name="清华周刊", first=7, last=8),
+        }
+        self.enterContext(unittest.mock.patch.dict(collib.BUILTIN, small, clear=True))
+        root = os.path.join(self.tmp.name, "TJ")
+        self.run_cli("download", "-c", "all", "-q", "--dest-root", root)
+        self.run_cli("absent", "-c", "all", "-q", "--dest-root", root)
+        self.assertTrue(os.path.exists(os.path.join(root, "xqh", "absent-xqh.txt")))
+        self.assertTrue(os.path.exists(os.path.join(root, "qhzk", "absent-qhzk.txt")))
+
+
+class TestCompressIds(unittest.TestCase):
+    def test_consecutive_runs_collapse(self):
+        from thu_xqh.cli import _compress_ids
+        self.assertEqual(_compress_ids(["0011", "0019", "0020", "0021"]),
+                         "0011, 0019-0021")
+
+    def test_single_ids_stay_single(self):
+        from thu_xqh.cli import _compress_ids
+        self.assertEqual(_compress_ids(["0011", "0013"]), "0011, 0013")
+
+    def test_series_do_not_merge_across_prefixes(self):
+        from thu_xqh.cli import _compress_ids
+        self.assertEqual(_compress_ids(["0832", "f0001", "f0002"]),
+                         "0832, f0001-f0002")
+
+    def test_supplements_are_listed_individually(self):
+        from thu_xqh.cli import _compress_ids
+        self.assertEqual(_compress_ids(["1669", "1670", "1670Z22"]),
+                         "1669-1670, 1670Z22")
+
+    def test_empty(self):
+        from thu_xqh.cli import _compress_ids
+        self.assertEqual(_compress_ids([]), "")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

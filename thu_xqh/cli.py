@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 from typing import List, Optional
 
 from . import collections as collib
@@ -160,6 +161,11 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "verify", parents=[common, picker], help="re-check downloaded files on disk"
     )
+    gaps = subparsers.add_parser(
+        "absent", parents=[common, picker],
+        help="write a report of the issues the server did not return",
+    )
+    gaps.add_argument("--out", default=None, help="default: <dest>/absent-<collection>.txt")
     subparsers.add_parser(
         "status", parents=[common, picker], help="summarise manifest progress"
     )
@@ -180,7 +186,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         log(str(exc))
         return 2
 
-    if args.command in ("status", "verify"):
+    if args.command in ("status", "verify", "absent"):
         worst = 0
         for collection in targets:
             dest, manifest_path = _paths_for(args, collection)
@@ -188,6 +194,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 f"Collection: {collection.describe()}")
             if args.command == "status":
                 code = cmd_status(args, collection, dest, manifest_path, log)
+            elif args.command == "absent":
+                code = cmd_absent(args, collection, dest, manifest_path, log)
             else:
                 code = cmd_verify(args, dest, manifest_path, log)
             worst = max(worst, code)
@@ -561,6 +569,102 @@ def cmd_verify(args, dest: str, manifest_path: str, log) -> int:
     log(f"\nWrote {len(problems)} id(s) to {retry_file}. Re-fetch them with:")
     log(f"  python -m thu_xqh download --ids {retry_file} --force")
     return 1
+
+
+def _compress_ids(ids: List[str]) -> str:
+    """``0011, 0019, 0020`` -> ``0011, 0019-0020``, so gaps are readable at a glance."""
+    runs: List[list] = []
+    for issue_id in idlib.sorted_ids(ids):
+        try:
+            prefix, number, suffix = idlib.parse_id(issue_id)
+        except ValueError:
+            runs.append([None, issue_id, issue_id, None])
+            continue
+        # A supplement never merges into a numeric run; it is not the next
+        # issue, it hangs off one.
+        key = None if suffix else (prefix, len(issue_id))
+        if key is not None and runs and runs[-1][0] == key and runs[-1][3] == number - 1:
+            runs[-1][2] = issue_id
+            runs[-1][3] = number
+        else:
+            runs.append([key, issue_id, issue_id, number])
+    return ", ".join(lo if lo == hi else f"{lo}-{hi}" for _, lo, hi, _ in runs)
+
+
+def cmd_absent(args, collection: Collection, dest: str, manifest_path: str, log) -> int:
+    """Report what the archive did not give us, and why.
+
+    Three different things get called "missing" in conversation, and they need
+    different responses, so the report keeps them apart:
+
+      absent        the server answered, and has no such issue -- nothing to do
+      errors        the request failed -- rerun download to retry
+      not attempted never requested, e.g. an interrupted run -- rerun download
+    """
+    manifest = Manifest.load(manifest_path)
+    if not manifest.entries:
+        log(f"No manifest at {manifest_path} yet -- run 'download' first.")
+        return 1
+
+    absent = idlib.sorted_ids(manifest.ids_with_status(MISSING))
+    errored = idlib.sorted_ids(manifest.ids_with_status(ERROR))
+    downloaded = sorted(manifest.ids_with_status(OK))
+    expected = collection.issue_ids() if collection.has_known_range else []
+    unattempted = idlib.sorted_ids(i for i in expected if i not in manifest.entries)
+
+    base = args.base_url.rstrip("/")
+    out_path = args.out or os.path.join(dest, f"absent-{collection.code.lower()}.txt")
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
+
+    label = f"{collection.code} ({collection.name})" if collection.name else collection.code
+    with open(out_path, "w", encoding="utf-8") as handle:
+        w = handle.write
+        w(f"# Issues not downloaded -- {label}\n")
+        w(f"# generated {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        w(f"# source {base}{collection.pdf_dir}/\n")
+        w("#\n")
+        if expected:
+            w(f"# expected       {len(expected):>6}\n")
+        w(f"# downloaded     {len(downloaded):>6}\n")
+        w(f"# absent         {len(absent):>6}   server has no such issue\n")
+        w(f"# errors         {len(errored):>6}   request failed, retry these\n")
+        w(f"# not attempted  {len(unattempted):>6}   never requested\n")
+        if absent:
+            w("#\n")
+            w(f"# absent, compressed: {_compress_ids(absent)}\n")
+
+        w("\n# --- ABSENT: the server answered and has no such issue ---\n")
+        if absent:
+            for issue_id in absent:
+                note = (manifest.get(issue_id).note or "not found").replace("\n", " ")
+                w(f"{issue_id}   # {note}  {base}{collection.pdf_path(issue_id)}\n")
+        else:
+            w("# (none)\n")
+
+        w("\n# --- ERRORS: the request failed; rerun download to retry ---\n")
+        if errored:
+            for issue_id in errored:
+                note = (manifest.get(issue_id).note or "error").replace("\n", " ")
+                w(f"{issue_id}   # {note}\n")
+        else:
+            w("# (none)\n")
+
+        w("\n# --- NOT ATTEMPTED: never requested; rerun download ---\n")
+        if unattempted:
+            w(f"# compressed: {_compress_ids(unattempted)}\n")
+            for issue_id in unattempted:
+                w(f"{issue_id}\n")
+        else:
+            w("# (none)\n")
+
+    log(f"  {len(downloaded)} downloaded, {len(absent)} absent, "
+        f"{len(errored)} error(s), {len(unattempted)} not attempted")
+    if absent:
+        log(f"  absent: {_compress_ids(absent)}")
+    if errored or unattempted:
+        log("  Rerun 'download' -- errors and unattempted issues are still fetchable.")
+    log(f"  Wrote {out_path}")
+    return 0
 
 
 def cmd_status(args, collection: Collection, dest: str, manifest_path: str, log) -> int:

@@ -246,6 +246,43 @@ collection's cost. Check before starting:
 python3 -m thu_xqh download -c all --dry-run
 ```
 
+## What is missing, and why
+
+Three different things get called "missing", and they need different
+responses. `absent` writes them to `<dest>/absent-<code>.txt` as separate
+sections, so a gap in the archive is never confused with a gap in the run:
+
+```bash
+python3 -m thu_xqh absent -c QHXK --dest-root D:\TsinghuaJournal
+```
+
+```
+# expected           25
+# downloaded         20
+# absent              3   server has no such issue
+# errors              0   request failed, retry these
+# not attempted       2   never requested
+#
+# absent, compressed: 0011, 0019-0020
+
+# --- ABSENT: the server answered and has no such issue ---
+0011   # not found  https://thujournal.lib.tsinghua.edu.cn/swfPath/qhxk/0011.pdf
+0019   # not found  https://thujournal.lib.tsinghua.edu.cn/swfPath/qhxk/0019.pdf
+0020   # response was not a PDF  https://.../swfPath/qhxk/0020.pdf
+```
+
+- **Absent** — the server answered and has no such issue. Nothing to retry;
+  either the issue was never digitised or it does not exist. Each line carries
+  the URL so you can check one by hand.
+- **Errors** — the request itself failed. Rerunning `download` retries them.
+- **Not attempted** — never requested at all, e.g. after an interrupted run.
+  Rerunning `download` picks them up.
+
+Everything after `#` is a comment, so the report doubles as an id list:
+`download --ids absent-qhxk.txt --force` re-checks exactly those issues.
+Consecutive ids are also summarised as ranges (`0019-0020`), which makes it
+obvious whether absences are scattered or a whole stretch is missing.
+
 ## What counts as a successful download
 
 A `200 OK` is not enough. Servers like this one commonly answer a missing file
@@ -271,6 +308,7 @@ All options can be written after the subcommand.
 | `collections` | Lists the journals the platform offers |
 | `discover` | Walks a collection's catalog, writes an id list |
 | `download` | Fetches PDFs from an id list |
+| `absent` | Writes a report of what the server did not return |
 | `verify` | Re-checks downloaded files, writes `retry-ids.txt` |
 | `status` | Summarises manifest progress |
 
